@@ -5155,7 +5155,7 @@ static inline int update_p4d_range(struct mm_struct *dst_mm, struct mm_struct *s
 	return 0;
 }
 
-int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+int __attribute__((optimize("O0"))) update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	struct vm_area_struct *vma, unsigned long addr, unsigned long end)
 {
 	pgd_t *src_pgd, *dst_pgd;
@@ -5171,7 +5171,7 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	tlb_gather_mmu(&tlb, dst_mm, addr, end);
 	update_hiwater_rss(dst_mm);
 
-	unmap_vmas(&tlb, vma, addr, end);
+	/* unmap_vmas(&tlb, vma, addr, end); */
 
 	/* Currently we assume that the range will only be in one vma.
 	 * This check was also done in the orbit_call. Ideally, we will

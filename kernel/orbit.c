@@ -22,7 +22,7 @@ struct orbit_task *orbit_create_task(void __user *arg,
 	new_task->retval = 0;
 	new_task->arg = arg;
 	new_task->start = start;
-	new_task->start = end;
+	new_task->end = end;
 
 	return new_task;
 }
@@ -93,6 +93,8 @@ SYSCALL_DEFINE5(orbit_call, int, obid,
 	return ret;
 }
 
+long __attribute__((optimize("O0"))) orbit_return_internal(unsigned long retval);
+
 /* This function has two halves:
  * 1) The first half return the result of the last task.
  *
@@ -104,6 +106,11 @@ SYSCALL_DEFINE5(orbit_call, int, obid,
  *    has finished running.
  */
 SYSCALL_DEFINE1(orbit_return, unsigned long, retval)
+{
+	return orbit_return_internal(retval);
+}
+
+long __attribute__((optimize("O0"))) orbit_return_internal(unsigned long retval)
 {
 	struct task_struct *ob, *parent;
 	struct orbit_info *info;
@@ -148,7 +155,11 @@ SYSCALL_DEFINE1(orbit_return, unsigned long, retval)
 	}
 	/* TODO: Update orbit vma list */
 	/* Copy page range */
+#if 1
 	update_page_range(ob->mm, parent->mm, parent_vma, task->start, task->end);
+#else
+	copy_page_range(ob->mm, parent->mm, parent_vma);
+#endif
 
 	/* 3. Setup the user argument to call entry_func.
 	 * Current implementation is that the user runtime library passes

@@ -95,6 +95,7 @@
 #include <linux/thread_info.h>
 #include <linux/stackleak.h>
 #include <linux/orbit.h>
+#include <linux/printk.h>
 
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
@@ -2560,7 +2561,7 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 SYSCALL_DEFINE1(orbit_create, void __user **, orbit_argptr)
 {
 	const u64 clone_flags = (/*CLONE_VM |*/ CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
-				| CLONE_SIGHAND | CLONE_THREAD
+				/* | CLONE_SIGHAND | CLONE_THREAD */
 				| CLONE_SETTLS | CLONE_PARENT_SETTID
 				| CLONE_CHILD_CLEARTID
 				| CLONE_ORBIT);
@@ -2572,7 +2573,9 @@ SYSCALL_DEFINE1(orbit_create, void __user **, orbit_argptr)
 		.orbit_argptr	= orbit_argptr,
 	};
 
-	return _do_fork(&args);
+	long ret = _do_fork(&args);
+	printk("in orbit_create, do fork returns %d\n", ret);
+	return ret;
 }
 
 #ifdef __ARCH_WANT_SYS_CLONE3
