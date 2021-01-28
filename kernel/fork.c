@@ -94,6 +94,7 @@
 #include <linux/livepatch.h>
 #include <linux/thread_info.h>
 #include <linux/stackleak.h>
+#include <linux/orbit.h>
 
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
@@ -2080,7 +2081,7 @@ static __latent_entropy struct task_struct *copy_process(
 	/* Orbit  */
 
 	if (clone_flags & CLONE_ORBIT) {
-		p->orbit_info = orbit_create_info(args->argptr);
+		p->orbit_info = orbit_create_info(args->orbit_argptr);
 		if (p->orbit_info == NULL)
 			goto bad_orbit_creation;
 
@@ -2090,8 +2091,8 @@ static __latent_entropy struct task_struct *copy_process(
 		current->orbit_child = p;
 		p->orbit_child = current;
 	} else {
-		p->orbit_child = current->orbit_child =
-			p->orbit_info = current->orbit_info = NULL;
+		p->orbit_child = current->orbit_child = NULL;
+		p->orbit_info = current->orbit_info = NULL;
 		p->is_orbit = current->is_orbit = 0;
 	}
 
@@ -2558,7 +2559,7 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 
 SYSCALL_DEFINE1(orbit_create, void __user **, orbit_argptr)
 {
-	const int clone_flags = (/*CLONE_VM |*/ CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
+	const u64 clone_flags = (/*CLONE_VM |*/ CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
 				| CLONE_SIGHAND | CLONE_THREAD
 				| CLONE_SETTLS | CLONE_PARENT_SETTID
 				| CLONE_CHILD_CLEARTID

@@ -1466,6 +1466,9 @@ void free_pgd_range(struct mmu_gather *tlb, unsigned long addr,
 		unsigned long end, unsigned long floor, unsigned long ceiling);
 int copy_page_range(struct mm_struct *dst, struct mm_struct *src,
 			struct vm_area_struct *vma);
+/* Orbit helper function: update dst mm according to specific range in src mm */
+int update_page_range(struct mm_struct *dst, struct mm_struct *src,
+	struct vm_area_struct *vma, unsigned long addr, unsigned long end);
 int follow_pte_pmd(struct mm_struct *mm, unsigned long address,
 		   struct mmu_notifier_range *range,
 		   pte_t **ptepp, pmd_t **pmdpp, spinlock_t **ptlp);
