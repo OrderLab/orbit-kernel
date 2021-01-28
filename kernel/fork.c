@@ -2075,6 +2075,26 @@ static __latent_entropy struct task_struct *copy_process(
 			goto bad_fork_put_pidfd;
 	}
 
+	/* TODO: create orbit_info struct shared between parent and child. */
+	/* TODO: dealloc orbit_info to prevent memory leak. */
+	/* Orbit  */
+
+	if (clone_flags & CLONE_ORBIT) {
+		p->orbit_info = orbit_create_info(args->argptr);
+		if (p->orbit_info == NULL)
+			goto bad_orbit_creation;
+
+		/* We do not store orbit info in the parent. */
+		current->orbit_info = NULL;
+
+		current->orbit_child = p;
+		p->orbit_child = current;
+	} else {
+		p->orbit_child = current->orbit_child =
+			p->orbit_info = current->orbit_info = NULL;
+		p->is_orbit = current->is_orbit = 0;
+	}
+
 #ifdef CONFIG_BLOCK
 	p->plug = NULL;
 #endif
@@ -2251,6 +2271,7 @@ bad_fork_cancel_cgroup:
 	cgroup_cancel_fork(p);
 bad_fork_cgroup_threadgroup_change_end:
 	cgroup_threadgroup_change_end(current);
+bad_orbit_creation:
 bad_fork_put_pidfd:
 	if (clone_flags & CLONE_PIDFD) {
 		fput(pidfile);
@@ -2534,6 +2555,24 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 	return _do_fork(&args);
 }
 #endif
+
+SYSCALL_DEFINE1(orbit_create, void __user **, orbit_argptr)
+{
+	const int clone_flags = (/*CLONE_VM |*/ CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
+				| CLONE_SIGHAND | CLONE_THREAD
+				| CLONE_SETTLS | CLONE_PARENT_SETTID
+				| CLONE_CHILD_CLEARTID
+				| CLONE_ORBIT);
+	/* const int flags = CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD; */
+
+	struct kernel_clone_args args = {
+		.flags		= clone_flags,
+		.exit_signal	= -1,
+		.orbit_argptr	= orbit_argptr,
+	};
+
+	return _do_fork(&args);
+}
 
 #ifdef __ARCH_WANT_SYS_CLONE3
 
