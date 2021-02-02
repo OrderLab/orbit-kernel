@@ -362,6 +362,8 @@
 436	common	orbit_create		__x64_sys_orbit_create
 437	common	orbit_call		__x64_sys_orbit_call
 438	common	orbit_return		__x64_sys_orbit_return
+439	common	orbit_send		__x64_sys_orbit_send
+440	common	orbit_recv		__x64_sys_orbit_recv
 
 #
 # x32-specific system call numbers start at 512 to avoid cache impact

@@ -1917,6 +1917,11 @@ static __latent_entropy struct task_struct *copy_process(
 	p->flags |= PF_FORKNOEXEC;
 	INIT_LIST_HEAD(&p->children);
 	INIT_LIST_HEAD(&p->sibling);
+	/* Orbit */
+	p->orbit_child = NULL;
+	p->is_orbit = 0;
+	p->orbit_info = NULL;
+
 	rcu_copy_process(p);
 	p->vfork_done = NULL;
 	spin_lock_init(&p->alloc_lock);
@@ -2077,14 +2082,21 @@ static __latent_entropy struct task_struct *copy_process(
 			goto bad_fork_put_pidfd;
 	}
 
-	/* TODO: create orbit_info struct shared between parent and child. */
-	/* TODO: dealloc orbit_info to prevent memory leak. */
-	/* Orbit  */
-
+	/* FIXME: dealloc orbit_info in process exit to prevent memory leak. */
+	/*
+	 * Orbit setup
+	 */
 	if (clone_flags & CLONE_ORBIT) {
+		if (current->orbit_child != NULL) {
+			printk("Unimplemented: currently only support one "
+				"orbit instance.");
+			goto bad_fork_put_pidfd;
+		}
+
 		p->orbit_info = orbit_create_info(args->orbit_argptr);
 		if (p->orbit_info == NULL)
-			goto bad_orbit_creation;
+			goto bad_fork_put_pidfd;
+		/* If any error happens after here, goto bad_orbit_creation */
 
 		/* We do not store orbit info in the parent. */
 		current->orbit_info = NULL;
@@ -2092,9 +2104,9 @@ static __latent_entropy struct task_struct *copy_process(
 		current->orbit_child = p;
 		p->orbit_child = current;
 	} else {
-		p->orbit_child = current->orbit_child = NULL;
-		p->orbit_info = current->orbit_info = NULL;
-		p->is_orbit = current->is_orbit = 0;
+		/* FIXME: orbit should be shared among thread group, regardless
+		 * creation order. */
+		p->orbit_child = current->orbit_child;
 	}
 
 #ifdef CONFIG_BLOCK
@@ -2273,7 +2285,8 @@ bad_fork_cancel_cgroup:
 	cgroup_cancel_fork(p);
 bad_fork_cgroup_threadgroup_change_end:
 	cgroup_threadgroup_change_end(current);
-bad_orbit_creation:
+/* bad_orbit_creation: */
+	kfree(p->orbit_info);
 bad_fork_put_pidfd:
 	if (clone_flags & CLONE_PIDFD) {
 		fput(pidfile);
@@ -2574,7 +2587,7 @@ SYSCALL_DEFINE1(orbit_create, void __user **, orbit_argptr)
 	};
 
 	long ret = _do_fork(&args);
-	printk("in orbit_create, do fork returns %d\n", ret);
+	printk("in orbit_create, do fork returns %ld\n", ret);
 	return ret;
 }
 
