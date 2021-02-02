@@ -34,10 +34,12 @@ struct orbit_info {
 struct orbit_task {
 	unsigned long		taskid;		/* valid taskid starts from 1 */
 	unsigned long		flags;
+	unsigned int		elem_removed;
 	struct list_head	elem;
-	/* ARC. Value should be list_size(updates).
+	/* ARC. Value should be 1 + list_size(updates). 1 is a sentinel value
+	 * to prevent underflow, using refcount_dec_not_one.
 	 * This is currently only used in ORBIT_ASYNC mode. */
-	refcount_t		refcount;
+	refcount_t		list_count;
 	/* In non-async mode, orbit_call will wait on this semaphore. */
 	struct semaphore	finish;
 
@@ -47,6 +49,7 @@ struct orbit_task {
 
 	struct mutex		updates_lock;	/* lock for update list */
 	struct semaphore	updates_sem;
+	refcount_t		recv_count;	/* used for cancellable sem */
 	struct list_head	updates;	/* List of updates to be applied */
 } __randomize_layout;
 

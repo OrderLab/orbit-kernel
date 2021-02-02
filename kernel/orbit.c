@@ -23,18 +23,26 @@ struct orbit_task *orbit_create_task(unsigned long flags, void __user *arg,
 	INIT_LIST_HEAD(&new_task->updates);
 	sema_init(&new_task->updates_sem, 0);
 	mutex_init(&new_task->updates_lock);
-	//if (flags & ORBIT_ASYNC)
-		refcount_set(&new_task->refcount, 0);
-	//else
-		sema_init(&new_task->finish, 0);
+	refcount_set(&new_task->list_count, 1);	/* Use 1 as sentinel value */
+	refcount_set(&new_task->recv_count, 1);	/* 1 for last cleanup */
+	sema_init(&new_task->finish, 0);
 	new_task->retval = 0;
 	new_task->arg = arg;
 	new_task->start = start;
 	new_task->end = end;
 	new_task->taskid = 0;	/* taskid will be allocated later */
 	new_task->flags = flags;
+	new_task->elem_removed = 0;
 
 	return new_task;
+}
+
+void orbit_cleanup_task(struct orbit_task *task)
+{
+	int i;
+	list_del(&task->elem);
+
+	kfree(task);
 }
 
 struct orbit_info *orbit_create_info(void __user **argptr)
@@ -123,6 +131,7 @@ long __attribute__((optimize("O0"))) orbit_call_internal(
 	ret = new_task->retval;
 
 /* free_task: */
+	list_del(&task->elem);
 	kfree(new_task);
 
 	return ret;
@@ -182,7 +191,7 @@ long __attribute__((optimize("O0"))) orbit_send_internal(
 #endif
 
 	mutex_lock(&current_task->updates_lock);
-	refcount_inc(&current_task->refcount);
+	refcount_inc(&current_task->list_count);
 	list_add_tail(&new_update->elem, &current_task->updates);
 	mutex_unlock(&current_task->updates_lock);
 	up(&current_task->updates_sem);
@@ -190,7 +199,8 @@ long __attribute__((optimize("O0"))) orbit_send_internal(
 	return 0;
 }
 
-/* Return value: 0 for success, other value for failure */
+/* Return value: 0 for success, negative value for failure,
+		 1 for end of messages */
 long __attribute__((optimize("O0"))) orbit_recv_internal(unsigned long obid,
 	unsigned long taskid, struct orbit_update_user __user *update_user);
 
@@ -210,6 +220,7 @@ long __attribute__((optimize("O0"))) orbit_recv_internal(unsigned long obid,
 	struct orbit_task *task;
 	struct orbit_update *update;
 	struct list_head *iter;
+	long ret = 0;
 	int found = 0;
 
 	/* TODO: maybe use rbtree along with the list? */
@@ -221,28 +232,56 @@ long __attribute__((optimize("O0"))) orbit_recv_internal(unsigned long obid,
 			break;
 		}
 	}
-	mutex_unlock(&info->task_lock);
 
 	if (!found) {
 		printk("taskid %lu not found", taskid);
+		mutex_unlock(&info->task_lock);
 		return -EINVAL;
 	}
 
 	/* This syscall is only available for async mode tasks. */
-	if (!(task->flags & ORBIT_ASYNC))
+	if (!(task->flags & ORBIT_ASYNC)) {
+		mutex_unlock(&info->task_lock);
 		return -EINVAL;
-
-	/* Now get one of the updates */
-	/* FIXME: wake up this */
-	down(&task->updates_sem);
-	mutex_lock(&task->updates_lock);
-	if (unlikely(list_empty(&task->updates))) {
-		mutex_unlock(&task->updates_lock);
-		return -EIDRM;	/* End of message list. */
 	}
-	update = list_first_entry(&task->updates, struct orbit_update, elem);
-	list_del(&update->elem);
-	mutex_unlock(&task->updates_lock);
+
+	/* If already finished, and nothing left, remove us from the list. */
+	if (task->finish.value) {
+		/* There are still things left. */
+		if (refcount_dec_not_one(&task->list_count)) {
+			refcount_inc(&task->recv_count);
+			down(&task->updates_sem);
+			mutex_unlock(&info->task_lock);
+
+			mutex_lock(&task->updates_lock);
+			if (unlikely(list_empty(&task->updates)))
+				panic("In orbit_recv, updates list is empty");
+			update = list_first_entry(&task->updates, struct orbit_update, elem);
+			list_del(&update->elem);
+			mutex_unlock(&task->updates_lock);
+			do_del = 1;
+		} else {
+			list_del(&task->elem);
+			mutex_unlock(&info->task_lock);
+			return 1;
+		}
+	} else {
+		refcount_inc(&task->recv_count);
+		mutex_unlock(&info->task_lock);
+		down(&task->updates_sem);
+		/* If list is already empty, then it's a fake signal. Try to do cleanup. */
+		if (!refcount_dec_not_one(&task->list_count)) {
+			ret = 1;
+			goto try_free;
+		}
+		mutex_lock(&task->updates_lock);
+		if (unlikely(list_empty(&task->updates)))
+			panic("In orbit_recv, updates list is empty");
+		update = list_first_entry(&task->updates, struct orbit_update, elem);
+		list_del(&update->elem);
+		mutex_unlock(&task->updates_lock);
+	}
+
 
 	/* TODO: check return value of copy */
 #if 0
@@ -255,10 +294,11 @@ long __attribute__((optimize("O0"))) orbit_recv_internal(unsigned long obid,
 
 	kfree(update);
 
+try_free:
 	/* ARC free task object */
-	if (refcount_dec_and_test(&task->refcount) &&
-		down_trylock(&task->finish) == 0) {
-		list_del(&task->elem);
+	if (refcount_dec_and_test(&task->recv_count)) {
+		if (!task->elem_removed)
+			list_del(&task->elem);
 		kfree(task);
 	}
 
@@ -288,6 +328,7 @@ long __attribute__((optimize("O0"))) orbit_return_internal(unsigned long retval)
 	struct orbit_info *info;
 	struct orbit_task *task;	/* Both old and new task. */
 	struct vm_area_struct *parent_vma;
+	unsigned int i, count;
 
 	ob = current;
 	parent = ob->orbit_child;	/* Currntly orbit_child in orbit is
@@ -307,18 +348,33 @@ long __attribute__((optimize("O0"))) orbit_return_internal(unsigned long retval)
 		info->next_task = list_is_last(&task->elem, &info->task_list) ?
 					NULL : list_next_entry(task, elem);
 
-		/* In async mode, dec refcount and try to cleanup.
-		 * Orbit_recv function will also try to cleanup. */
+		/* In async mode, free is handled by refcount.
+		 * Only when list refcount is 0 and recv refcount is 0
+		 * do we cleanup now.
+		 * If list refcount is not 0, just leave it there.
+		 * If list refcount is 0 but recv refcount is not 0, we need
+		 * to wakeup extra receivers.
+		 */
 		if (task->flags & ORBIT_ASYNC) {
 			up(&task->finish);
-			if (refcount_read(&task->refcount) == 0 &&
-				down_trylock(&task->finish) == 0) {
+			if (refcount_read(&task->list_count) == 1) {
 				list_del(&task->elem);
-				kfree(task);
+				task->elem_removed = 1;
+				if (refcount_dec_and_test(&task->recv_count)) {
+					kfree(task);
+				} else {
+					/* count = refcount_read(&task->recv_count); */
+					/* We may have up()ed more times than
+					 * needed, but it is still correct. */
+					/* for (i = 0; i < count; ++i) */
+
+					/* Serialize up() for extra receivers */
+					up(&task->updates_sem);
+				}
 			}
 		} else {
-			/* Otherwise, orbit_call will wait for down(). */
 			list_del(&task->elem);
+			task->elem_removed = 1;
 			up(&task->finish);
 		}
 
