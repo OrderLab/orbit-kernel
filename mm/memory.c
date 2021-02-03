@@ -4768,121 +4768,84 @@ void ptlock_free(struct page *page)
 
 /* === Start orbit helper functions === */
 
-static unsigned long zap_pte_range_orbit(struct mmu_gather *tlb,
-				struct vm_area_struct *vma, pmd_t *pmd,
-				unsigned long addr, unsigned long end)
+static unsigned long zap_pte_one_orbit(struct mmu_gather *tlb, int *rss,
+	struct vm_area_struct *vma,
+	pmd_t *pmd, pte_t *pte, unsigned long addr)
 {
 	struct mm_struct *mm = tlb->mm;
 	int force_flush = 0;
-	int rss[NR_MM_COUNTERS];
-	spinlock_t *ptl;
-	pte_t *start_pte;
-	pte_t *pte;
 	swp_entry_t entry;
 
-	tlb_change_page_size(tlb, PAGE_SIZE);
-again:
-	init_rss_vec(rss);
-	start_pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
-	pte = start_pte;
-	flush_tlb_batched_pending(mm);
-	arch_enter_lazy_mmu_mode();
-	do {
-		pte_t ptent = *pte;
-		if (pte_none(ptent))
+	pte_t ptent = *pte;
+
+	if (pte_none(ptent))
+		return 0;
+
+	if (pte_present(ptent)) {
+		struct page *page;
+
+		page = vm_normal_page(vma, addr, ptent);
+
+		ptent = ptep_get_and_clear_full(mm, addr, pte,
+						tlb->fullmm);
+		tlb_remove_tlb_entry(tlb, pte, addr);
+		if (unlikely(!page))
 			continue;
 
-		if (need_resched())
-			break;
-
-		if (pte_present(ptent)) {
-			struct page *page;
-
-			page = vm_normal_page(vma, addr, ptent);
-
-			ptent = ptep_get_and_clear_full(mm, addr, pte,
-							tlb->fullmm);
-			tlb_remove_tlb_entry(tlb, pte, addr);
-			if (unlikely(!page))
-				continue;
-
-			if (!PageAnon(page)) {
-				if (pte_dirty(ptent)) {
-					force_flush = 1;
-					set_page_dirty(page);
-				}
-				if (pte_young(ptent) &&
-				    likely(!(vma->vm_flags & VM_SEQ_READ)))
-					mark_page_accessed(page);
-			}
-			rss[mm_counter(page)]--;
-			page_remove_rmap(page, false);
-			if (unlikely(page_mapcount(page) < 0))
-				print_bad_pte(vma, addr, ptent, page);
-			if (unlikely(__tlb_remove_page(tlb, page))) {
+		if (!PageAnon(page)) {
+			if (pte_dirty(ptent)) {
 				force_flush = 1;
-				addr += PAGE_SIZE;
-				break;
+				set_page_dirty(page);
 			}
-			continue;
+			if (pte_young(ptent) &&
+			    likely(!(vma->vm_flags & VM_SEQ_READ)))
+				mark_page_accessed(page);
 		}
-
-		entry = pte_to_swp_entry(ptent);
-		if (non_swap_entry(entry) && is_device_private_entry(entry)) {
-			struct page *page = device_private_entry_to_page(entry);
-
-			pte_clear_not_present_full(mm, addr, pte, tlb->fullmm);
-			rss[mm_counter(page)]--;
-			page_remove_rmap(page, false);
-			put_page(page);
-			continue;
+		rss[mm_counter(page)]--;
+		page_remove_rmap(page, false);
+		if (unlikely(page_mapcount(page) < 0))
+			print_bad_pte(vma, addr, ptent, page);
+		if (unlikely(__tlb_remove_page(tlb, page))) {
+			/* TODO */
+			force_flush = 1;
+			/* addr += PAGE_SIZE; */
+			return 1;
 		}
+		return 0;
+	}
 
-		if (!non_swap_entry(entry))
-			rss[MM_SWAPENTS]--;
-		else if (is_migration_entry(entry)) {
-			struct page *page;
+	entry = pte_to_swp_entry(ptent);
+	if (non_swap_entry(entry) && is_device_private_entry(entry)) {
+		struct page *page = device_private_entry_to_page(entry);
 
-			page = migration_entry_to_page(entry);
-			rss[mm_counter(page)]--;
-		}
-		if (unlikely(!free_swap_and_cache(entry)))
-			print_bad_pte(vma, addr, ptent, NULL);
 		pte_clear_not_present_full(mm, addr, pte, tlb->fullmm);
-	} while (pte++, addr += PAGE_SIZE, addr != end);
-
-	add_mm_rss_vec(mm, rss);
-	arch_leave_lazy_mmu_mode();
-
-	/* Do the actual TLB flush before dropping ptl */
-	if (force_flush)
-		tlb_flush_mmu_tlbonly(tlb);
-	pte_unmap_unlock(start_pte, ptl);
-
-	/*
-	 * If we forced a TLB flush (either due to running out of
-	 * batch buffers or because we needed to flush dirty TLB
-	 * entries before releasing the ptl), free the batched
-	 * memory too. Restart if we didn't do everything.
-	 */
-	if (force_flush) {
-		force_flush = 0;
-		tlb_flush_mmu(tlb);
+		rss[mm_counter(page)]--;
+		page_remove_rmap(page, false);
+		put_page(page);
+		return 0;
 	}
 
-	if (addr != end) {
-		cond_resched();
-		goto again;
-	}
+	if (!non_swap_entry(entry))
+		rss[MM_SWAPENTS]--;
+	else if (is_migration_entry(entry)) {
+		struct page *page;
 
-	return addr;
+		page = migration_entry_to_page(entry);
+		rss[mm_counter(page)]--;
+	}
+	if (unlikely(!free_swap_and_cache(entry)))
+		print_bad_pte(vma, addr, ptent, NULL);
+	pte_clear_not_present_full(mm, addr, pte, tlb->fullmm);
+
+	return 0;
 }
 
 
 static inline unsigned long
 update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
-		pte_t *dst_pte, pte_t *src_pte, struct vm_area_struct *vma,
-		unsigned long addr, int *rss, struct mmu_gather *tlb)
+		pmd_t *dst_pmd, pte_t *dst_pte, pte_t *src_pte,
+		struct vm_area_struct *vma, unsigned long addr,
+		int *rss, struct mmu_gather *tlb)
 {
 	unsigned long vm_flags = vma->vm_flags;
 	pte_t pte = *src_pte;
@@ -4992,10 +4955,10 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	}
 
 out_set_pte:
-	/* TODO: zap old dst pte mapping, merge zap_pte_one() into update_one_pte() */
-	/* unsigned long ret = zap_pte_range_orbit(struct mmu_gather *tlb,
-				struct vm_area_struct *vma, pmd_t *pmd,
-				unsigned long addr, unsigned long end); */
+	/* zap old dst pte mapping */
+	/* TODO: return value? */
+	zap_pte_one_orbit(tlb, rss, vma, dst_pmd, dst_pte, addr);
+
 	set_pte_at(dst_mm, addr, dst_pte, pte);
 	return 0;
 }
@@ -5011,6 +4974,9 @@ static int update_pte_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	int rss[NR_MM_COUNTERS];
 	swp_entry_t entry = (swp_entry_t){0};
 
+	/* zap operations */
+	tlb_change_page_size(tlb, PAGE_SIZE);
+
 again:
 	init_rss_vec(rss);
 
@@ -5022,6 +4988,10 @@ again:
 	spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 	orig_src_pte = src_pte;
 	orig_dst_pte = dst_pte;
+
+	/* zap operations */
+	flush_tlb_batched_pending(mm);
+
 	arch_enter_lazy_mmu_mode();
 
 	do {
@@ -5039,8 +5009,8 @@ again:
 			progress++;
 			continue;
 		}
-		entry.val = update_one_pte(dst_mm, src_mm, dst_pte, src_pte,
-							vma, addr, rss, tlb);
+		entry.val = update_one_pte(dst_mm, src_mm, dst_pmd,
+				dst_pte, src_pte, vma, addr, rss, tlb);
 		if (entry.val)
 			break;
 		progress += 8;
@@ -5050,6 +5020,11 @@ again:
 	spin_unlock(src_ptl);
 	pte_unmap(orig_src_pte);
 	add_mm_rss_vec(dst_mm, rss);
+
+	/* zap operations */
+	/* if (force_flush)
+		tlb_flush_mmu_tlbonly(tlb); */
+
 	pte_unmap_unlock(orig_dst_pte, dst_ptl);
 	cond_resched();
 
@@ -5058,10 +5033,65 @@ again:
 			return -ENOMEM;
 		progress = 0;
 	}
-	if (addr != end)
+	if (addr != end) {
+		/* cond_resched(); maybe safe here */
 		goto again;
+	}
 	return 0;
 }
+
+/* Reduced zap function that was integrated into update_pte_range() */
+#if 0
+static unsigned long zap_pte_range_orbit(struct mmu_gather *tlb,
+				struct vm_area_struct *vma, pmd_t *pmd,
+				unsigned long addr, unsigned long end)
+{
+	struct mm_struct *mm = tlb->mm;
+	int force_flush = 0;
+	int rss[NR_MM_COUNTERS];
+	spinlock_t *ptl;
+	pte_t *start_pte;
+	pte_t *pte;
+	swp_entry_t entry;
+
+	tlb_change_page_size(tlb, PAGE_SIZE);
+again:
+	init_rss_vec(rss);
+	start_pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
+	pte = start_pte;
+	flush_tlb_batched_pending(mm);
+	arch_enter_lazy_mmu_mode();
+	do {
+		zap_pte_one_orbit(tlb, rss, vma, pmd, pte, addr);
+	} while (pte++, addr += PAGE_SIZE, addr != end);
+
+	add_mm_rss_vec(mm, rss);
+	arch_leave_lazy_mmu_mode();
+
+	/* Do the actual TLB flush before dropping ptl */
+	if (force_flush)
+		tlb_flush_mmu_tlbonly(tlb);
+	pte_unmap_unlock(start_pte, ptl);
+
+	/*
+	 * If we forced a TLB flush (either due to running out of
+	 * batch buffers or because we needed to flush dirty TLB
+	 * entries before releasing the ptl), free the batched
+	 * memory too. Restart if we didn't do everything.
+	 */
+	if (force_flush) {
+		force_flush = 0;
+		tlb_flush_mmu(tlb);
+	}
+
+	if (addr != end) {
+		cond_resched();
+		goto again;
+	}
+
+	return addr;
+}
+#endif
 
 static inline int update_pmd_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		pud_t *dst_pud, pud_t *src_pud, struct vm_area_struct *vma,
