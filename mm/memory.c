@@ -4790,7 +4790,7 @@ static unsigned long zap_pte_one_orbit(struct mmu_gather *tlb, int *rss,
 						tlb->fullmm);
 		tlb_remove_tlb_entry(tlb, pte, addr);
 		if (unlikely(!page))
-			continue;
+			return 0;
 
 		if (!PageAnon(page)) {
 			if (pte_dirty(ptent)) {
@@ -4990,7 +4990,7 @@ again:
 	orig_dst_pte = dst_pte;
 
 	/* zap operations */
-	flush_tlb_batched_pending(mm);
+	flush_tlb_batched_pending(tlb->mm);
 
 	arch_enter_lazy_mmu_mode();
 
@@ -5185,7 +5185,7 @@ static inline int update_p4d_range(struct mm_struct *dst_mm, struct mm_struct *s
 	return 0;
 }
 
-int __attribute__((optimize("O0"))) update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	struct vm_area_struct *vma, unsigned long addr, unsigned long end)
 {
 	pgd_t *src_pgd, *dst_pgd;

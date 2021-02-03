@@ -8,7 +8,17 @@ typedef void*(*obEntry)(void*);
 
 /* The snapshot and zap part is copied and modified from memory.c */
 
-#define whatis(x) printk(#x " is %lu\n", x)
+#define DBG 0
+
+#define printd if(DBG)printk
+
+#define whatis(x) printd(#x " is %lu\n", x)
+
+#if DBG == 1
+	#define internalreturn long __attribute__((optimize("O0")))
+#else
+	#define internalreturn static inline long __attribute__((always_inline))
+#endif
 
 struct orbit_task *orbit_create_task(unsigned long flags, void __user *arg,
 				unsigned long start, unsigned long end)
@@ -64,7 +74,7 @@ struct orbit_info *orbit_create_info(void __user **argptr)
 
 /* Return value: In normal mode, this call returns the checker call return
 	 value. When the ORBIT_ASYNC flag is set, this returns a taskid integer. */
-long __attribute__((optimize("O0"))) orbit_call_internal(
+internalreturn orbit_call_internal(
 	unsigned long flags, unsigned long obid,
 	unsigned long start, unsigned long end,
 	obEntry __user entry_func, void __user * arg);
@@ -79,8 +89,7 @@ SYSCALL_DEFINE6(orbit_call, unsigned long, flags,
 	return orbit_call_internal(flags, obid, start, end, entry_func, arg);
 }
 
-
-long __attribute__((optimize("O0"))) orbit_call_internal(
+internalreturn orbit_call_internal(
 	unsigned long flags, unsigned long obid,
 	unsigned long start, unsigned long end,
 	obEntry __user entry_func, void __user * arg)
@@ -141,7 +150,7 @@ struct orbit_update *orbit_create_update(size_t length)
 }
 
 /* Return value: 0 for success, other value for failure */
-long __attribute__((optimize("O0"))) orbit_send_internal(
+internalreturn orbit_send_internal(
 	const struct orbit_update_user __user * update);
 
 SYSCALL_DEFINE1(orbit_send, const struct orbit_update_user __user *, update)
@@ -149,7 +158,7 @@ SYSCALL_DEFINE1(orbit_send, const struct orbit_update_user __user *, update)
 	return orbit_send_internal(update);
 }
 
-long __attribute__((optimize("O0"))) orbit_send_internal(
+internalreturn orbit_send_internal(
 	const struct orbit_update_user __user * update)
 {
 	struct orbit_update *new_update;
@@ -173,11 +182,11 @@ long __attribute__((optimize("O0"))) orbit_send_internal(
 
 	/* TODO: check return value of copy */
 
-#if 0
-	copy_from_user(&new_update->userdata, update,
+#if DBG
+	memcpy(&new_update->userdata, update,
 			sizeof(struct orbit_update_user) + length);
 #else
-	memcpy(&new_update->userdata, update,
+	copy_from_user(&new_update->userdata, update,
 			sizeof(struct orbit_update_user) + length);
 #endif
 
@@ -191,7 +200,7 @@ long __attribute__((optimize("O0"))) orbit_send_internal(
 }
 
 /* Return value: 0 for success, other value for failure */
-long __attribute__((optimize("O0"))) orbit_recv_internal(unsigned long obid,
+internalreturn orbit_recv_internal(unsigned long obid,
 	unsigned long taskid, struct orbit_update_user __user *update_user);
 
 SYSCALL_DEFINE3(orbit_recv, unsigned long, obid,
@@ -201,7 +210,7 @@ SYSCALL_DEFINE3(orbit_recv, unsigned long, obid,
 	return orbit_recv_internal(obid, taskid, update_user);
 }
 
-long __attribute__((optimize("O0"))) orbit_recv_internal(unsigned long obid,
+internalreturn orbit_recv_internal(unsigned long obid,
 	unsigned long taskid, struct orbit_update_user __user *update_user)
 {
 	/* TODO: allow multiple orbit */
@@ -245,11 +254,11 @@ long __attribute__((optimize("O0"))) orbit_recv_internal(unsigned long obid,
 	mutex_unlock(&task->updates_lock);
 
 	/* TODO: check return value of copy */
-#if 0
-	copy_to_user(update_user, &update->userdata,
+#if DBG
+	memcpy(update_user, &update->userdata,
 		sizeof(struct orbit_update_user) + update->userdata.length);
 #else
-	memcpy(update_user, &update->userdata,
+	copy_to_user(update_user, &update->userdata,
 		sizeof(struct orbit_update_user) + update->userdata.length);
 #endif
 
@@ -265,7 +274,7 @@ long __attribute__((optimize("O0"))) orbit_recv_internal(unsigned long obid,
 	return 0;
 }
 
-long __attribute__((optimize("O0"))) orbit_return_internal(unsigned long retval);
+internalreturn orbit_return_internal(unsigned long retval);
 
 /* This function has two halves:
  * 1) The first half return the result of the last task.
@@ -282,7 +291,7 @@ SYSCALL_DEFINE1(orbit_return, unsigned long, retval)
 	return orbit_return_internal(retval);
 }
 
-long __attribute__((optimize("O0"))) orbit_return_internal(unsigned long retval)
+internalreturn orbit_return_internal(unsigned long retval)
 {
 	struct task_struct *ob, *parent;
 	struct orbit_info *info;

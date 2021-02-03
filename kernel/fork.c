@@ -2575,7 +2575,7 @@ SYSCALL_DEFINE1(orbit_create, void __user **, orbit_argptr)
 {
 	const u64 clone_flags = (/*CLONE_VM |*/ CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
 				/* | CLONE_SIGHAND | CLONE_THREAD */
-				| CLONE_SETTLS | CLONE_PARENT_SETTID
+				/* | CLONE_SETTLS */ | CLONE_PARENT_SETTID
 				| CLONE_CHILD_CLEARTID
 				| CLONE_ORBIT);
 	/* const int flags = CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD; */
