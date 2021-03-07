@@ -8,7 +8,7 @@ typedef void*(*obEntry)(void*);
 
 /* The snapshot and zap part is copied and modified from memory.c */
 
-#define DBG 0
+#define DBG 1
 
 #define printd if(DBG)printk
 
@@ -104,13 +104,15 @@ internalreturn orbit_call_internal(
 
 	/* 1. Find the orbit context by obid, currently we only support one
 	 * orbit entity per process, thus we will ignore the obid. */
-	ob = current->orbit_child;
+	ob = current->group_leader->orbit_child;
 	info = ob->orbit_info;
 
 	/* 2. Create a orbit task struct and add to the orbit's task queue. */
 	new_task = orbit_create_task(flags, arg, start, end);
 	if (new_task == NULL)
 		return -ENOMEM;
+
+	printk("arg = %p, new_task->arg = %p\n", arg, new_task->arg);
 
 	/* Add task to the queue */
 	/* TODO: make killable? */
@@ -165,6 +167,9 @@ internalreturn orbit_send_internal(
 	unsigned long length;
 	struct orbit_task *current_task;
 
+	if (!current->is_orbit)
+		return -EINVAL;
+
 	/* TODO: check pointer validity */
 	current_task = current->orbit_info->current_task;
 
@@ -215,7 +220,7 @@ internalreturn orbit_recv_internal(unsigned long obid,
 {
 	/* TODO: allow multiple orbit */
 	/* TODO: check pointer validity */
-	struct orbit_info *info = current->orbit_child->orbit_info;
+	struct orbit_info *info = current->group_leader->orbit_child->orbit_info;
 	struct orbit_task *task;
 	struct orbit_update *update;
 	struct list_head *iter;
@@ -298,6 +303,9 @@ internalreturn orbit_return_internal(unsigned long retval)
 	struct orbit_task *task;	/* Both old and new task. */
 	struct vm_area_struct *parent_vma;
 
+	if (!current->is_orbit)
+		return -EINVAL;
+
 	ob = current;
 	parent = ob->orbit_child;	/* Currntly orbit_child in orbit is
 					 * reused as a pointer to parent. */
@@ -362,8 +370,9 @@ internalreturn orbit_return_internal(unsigned long retval)
 	}
 	/* TODO: Update orbit vma list */
 	/* Copy page range */
-#if 1
-	update_page_range(ob->mm, parent->mm, parent_vma, task->start, task->end);
+#if DBG
+	update_page_range(ob->mm, parent->mm, parent_vma, task->start, task->end,
+		ORBIT_UPDATE_SNAPSHOT);
 #else
 	copy_page_range(ob->mm, parent->mm, parent_vma);
 #endif
@@ -376,8 +385,197 @@ internalreturn orbit_return_internal(unsigned long retval)
 	 * TODO: For now we require the argument to be stored in the snapshotted
 	 * memory region.
 	 */
+	printk("task->arg = %p, info->argptr = %p\n", task->arg, info->argptr);
 	put_user(task->arg, info->argptr);
 
 	/* 4. Return to userspace to start checker code */
 	return 0;
+}
+
+/* Commit the changes made in the orbit.
+ * This is a page-level granularity update.
+ * This will automatically find the dirty pages and update back to main program. */
+internalreturn do_orbit_commit(void)
+{
+	struct task_struct *ob, *parent;
+	struct orbit_info *info;
+	struct orbit_task *task;	/* Both old and new task. */
+	struct vm_area_struct *ob_vma;
+	int ret;
+
+	if (!current->is_orbit)
+		return -EINVAL;
+
+	ob = current;
+	parent = ob->orbit_child;	/* Currntly orbit_child in orbit is
+					 * reused as a pointer to parent. */
+	info = ob->orbit_info;
+
+	task = info->current_task;
+
+	ob_vma = find_vma(ob->mm, task->start);
+	ret = update_page_range(parent->mm, ob->mm, ob_vma, task->start, task->end,
+		ORBIT_UPDATE_DIRTY);
+
+	return ret;
+}
+
+SYSCALL_DEFINE0(orbit_commit)
+{
+	return do_orbit_commit();
+}
+
+/* Encoded orbit updates and operations. */
+struct orbit_scratch {
+	void *ptr;
+	size_t cursor;
+	size_t size_limit;
+	size_t count;	/* Number of elements */
+};
+
+struct orbit_update_v {
+	struct list_head		elem;
+	struct orbit_scratch		userdata;
+};
+
+struct orbit_update_v *orbit_create_update_v(void)
+{
+	struct orbit_update_v *new_update;
+
+	new_update = kmalloc(sizeof(struct orbit_update_v), GFP_KERNEL);
+	if (new_update == NULL)
+		return NULL;
+	INIT_LIST_HEAD(&new_update->elem);
+
+	return new_update;
+}
+
+internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
+{
+	struct task_struct *ob, *parent;
+	struct orbit_info *info;
+	struct orbit_task *current_task;	/* Both old and new task. */
+	struct vm_area_struct *ob_vma;
+	int ret = 0;
+	struct orbit_update_v *new_update;
+
+	if (!current->is_orbit)
+		return -EINVAL;
+
+	ob = current;
+	parent = ob->orbit_child;	/* Currntly orbit_child in orbit is
+					 * reused as a pointer to parent. */
+	info = ob->orbit_info;
+
+	current_task = info->current_task;
+
+	/* This syscall is only available for async mode tasks. */
+	if (!(current_task->flags & ORBIT_ASYNC))
+		return -EINVAL;
+
+	new_update = orbit_create_update_v();
+	if (new_update == NULL)
+		return -ENOMEM;
+
+	/* TODO: check return value of copy */
+
+#if DBG
+	memcpy(&new_update->userdata, s, sizeof(struct orbit_scratch));
+#else
+	copy_from_user(&new_update->userdata, s, sizeof(struct orbit_scratch));
+#endif
+
+	unsigned long scratch_start = (unsigned long)new_update->userdata.ptr;
+	unsigned long scratch_end = scratch_start + new_update->userdata.size_limit;
+	/*unsigned long scratch_end = scratch_start + new_update->userdata.cursor;*/
+
+	ob_vma = find_vma(ob->mm, scratch_start);
+	ret = update_page_range(parent->mm, ob->mm, ob_vma, scratch_start, scratch_end,
+		ORBIT_UPDATE_SNAPSHOT);
+
+	mutex_lock(&current_task->updates_lock);
+	refcount_inc(&current_task->refcount);
+	list_add_tail(&new_update->elem, &current_task->updates);
+	mutex_unlock(&current_task->updates_lock);
+	up(&current_task->updates_sem);
+
+	return ret;
+}
+
+SYSCALL_DEFINE1(orbit_sendv, struct orbit_scratch __user *, s)
+{
+	return do_orbit_sendv(s);
+}
+
+internalreturn do_orbit_recvv(struct orbit_scratch __user *s, unsigned long taskid)
+{
+	struct task_struct *ob, *parent;
+	struct orbit_info *info;
+	struct orbit_task *task;	/* Both old and new task. */
+	int ret = 0;
+	struct orbit_update_v *update;
+	struct list_head *iter;
+	int found = 0;
+
+	parent = current->group_leader;
+	ob = parent->orbit_child;
+
+	info = ob->orbit_info;
+
+	task = info->current_task;
+
+	/* TODO: maybe use rbtree along with the list? */
+	mutex_lock(&info->task_lock);
+	list_for_each(iter, &info->task_list) {
+		task = list_entry(iter, struct orbit_task, elem);
+		if (task->taskid == taskid) {
+			found = 1;
+			break;
+		}
+	}
+	mutex_unlock(&info->task_lock);
+
+	if (!found) {
+		printk("taskid %lu not found", taskid);
+		return -EINVAL;
+	}
+
+	/* This syscall is only available for async mode tasks. */
+	if (!(task->flags & ORBIT_ASYNC))
+		return -EINVAL;
+
+	/* Now get one of the updates */
+	/* FIXME: wake up this */
+	down(&task->updates_sem);
+	mutex_lock(&task->updates_lock);
+	if (unlikely(list_empty(&task->updates))) {
+		mutex_unlock(&task->updates_lock);
+		return -EIDRM;	/* End of message list. */
+	}
+	update = list_first_entry(&task->updates, struct orbit_update_v, elem);
+	list_del(&update->elem);
+	mutex_unlock(&task->updates_lock);
+
+	/* TODO: check return value of copy */
+#if DBG
+	memcpy(s, &update->userdata, sizeof(struct orbit_scratch));
+#else
+	copy_to_user(s, &update->userdata, sizeof(struct orbit_scratch));
+#endif
+
+	kfree(update);
+
+	/* ARC free task object */
+	if (refcount_dec_and_test(&task->refcount) &&
+		down_trylock(&task->finish) == 0) {
+		list_del(&task->elem);
+		kfree(task);
+	}
+
+	return ret;
+}
+
+SYSCALL_DEFINE2(orbit_recvv, struct orbit_scratch __user *, s, unsigned long, taskid)
+{
+	return do_orbit_recvv(s, taskid);
 }

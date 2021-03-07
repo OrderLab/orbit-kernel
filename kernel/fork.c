@@ -2086,27 +2086,27 @@ static __latent_entropy struct task_struct *copy_process(
 	/*
 	 * Orbit setup
 	 */
+	// TODO: allow multiple orbit; allow orbit to attach process, thread, orbit
 	if (clone_flags & CLONE_ORBIT) {
-		if (current->orbit_child != NULL) {
+		if (current->group_leader->orbit_child != NULL) {
 			printk("Unimplemented: currently only support one "
 				"orbit instance.");
 			goto bad_fork_put_pidfd;
 		}
 
+		/* We do not store orbit info in the parent. */
 		p->orbit_info = orbit_create_info(args->orbit_argptr);
 		if (p->orbit_info == NULL)
 			goto bad_fork_put_pidfd;
 		/* If any error happens after here, goto bad_orbit_creation */
 
-		/* We do not store orbit info in the parent. */
-		current->orbit_info = NULL;
-
-		current->orbit_child = p;
-		p->orbit_child = current;
+		current->group_leader->orbit_child = p;
+		p->orbit_child = current->group_leader;
+		p->is_orbit = 1;
 	} else {
 		/* FIXME: orbit should be shared among thread group, regardless
 		 * creation order. */
-		p->orbit_child = current->orbit_child;
+		p->orbit_child = NULL;
 	}
 
 #ifdef CONFIG_BLOCK
@@ -2573,7 +2573,7 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 
 SYSCALL_DEFINE1(orbit_create, void __user **, orbit_argptr)
 {
-	const u64 clone_flags = (/*CLONE_VM |*/ CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
+	const u64 clone_flags = (/*CLONE_VM */CLONE_FS | /*| CLONE_FILES |*/ CLONE_SYSVSEM
 				/* | CLONE_SIGHAND | CLONE_THREAD */
 				/* | CLONE_SETTLS */ | CLONE_PARENT_SETTID
 				| CLONE_CHILD_CLEARTID
