@@ -4767,6 +4767,7 @@ void ptlock_free(struct page *page)
 
 
 /* === Start orbit helper functions === */
+/* The snapshot and zap part is copied and modified from {copy,zap}_page_range */
 
 static unsigned long zap_pte_one_orbit(struct mmu_gather *tlb, int *rss,
 	struct vm_area_struct *vma,
