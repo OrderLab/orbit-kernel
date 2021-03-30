@@ -4841,16 +4841,111 @@ static unsigned long zap_pte_one_orbit(struct mmu_gather *tlb, int *rss,
 	return 0;
 }
 
+struct snap_entry {
+	pte_t *pte;	/* PTE pointer */
+	pte_t ptent;	/* PTE value */
+};
+
+/* Deque structure */
+
+#define ARRSIZE 255
+
+struct snap_block {
+	struct list_head elem;
+	struct snap_entry array[ARRSIZE];
+};
+
+struct vma_snapshot {
+	size_t count;
+	size_t head, tail;	/* Cursor in the first and last snap_block */
+	struct list_head list;
+};
+
+void snap_init(struct vma_snapshot *snap)
+{
+	snap->count = 0;
+	snap->head = 0;
+	snap->tail = 0;
+	INIT_LIST_HEAD(&snap->list);
+}
+
+void snap_destroy(struct vma_snapshot *snap)
+{
+	struct snap_block *block;
+
+	if (snap->count != 0)
+		panic("Orbit snap not all applied");
+
+	while (!list_empty(&snap->list)) {
+		block = list_first_entry(&snap->list, struct snap_block, elem);
+		list_del(&block->elem);
+		kfree(block);
+	}
+}
+
+void snap_push(struct vma_snapshot *snap, pte_t *pte, pte_t ptent)
+{
+	struct snap_block *block;
+
+	if (!(pte_present(ptent) && !pte_write(ptent)))
+		panic("marked pte should be present & RO %p %lx", pte, ptent);
+
+	++snap->count;
+	if (list_empty(&snap->list) || snap->tail == ARRSIZE) {
+		block = kmalloc(sizeof(struct snap_block), GFP_KERNEL);
+		INIT_LIST_HEAD(&block->elem);
+		list_add_tail(&block->elem, &snap->list);
+		snap->tail = 0;
+	} else {
+		block = list_last_entry(&snap->list, struct snap_block, elem);
+	}
+	block->array[snap->tail++] = (struct snap_entry){ pte, ptent };
+}
+
+struct snap_entry *snap_front(struct vma_snapshot *snap)
+{
+	struct snap_block *block;
+	if (snap->count == 0)
+		return NULL;
+	block = list_first_entry(&snap->list, struct snap_block, elem);
+	return &block->array[snap->head];
+}
+
+void snap_pop(struct vma_snapshot *snap)
+{
+	struct snap_block *block;
+	if (snap->count == 0) return;
+	--snap->count;
+	if (++snap->head == ARRSIZE) {
+		block = list_first_entry(&snap->list, struct snap_block, elem);
+		list_del(&block->elem);
+		kfree(block);
+		snap->head = 0;
+	}
+}
+
 
 static inline unsigned long
 update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		pmd_t *dst_pmd, pte_t *dst_pte, pte_t *src_pte,
 		struct vm_area_struct *vma, unsigned long addr,
-		int *rss, struct mmu_gather *tlb, enum update_mode mode)
+		int *rss, struct mmu_gather *tlb, enum update_mode mode,
+		struct vma_snapshot *snap)
 {
 	unsigned long vm_flags = vma->vm_flags;
 	pte_t pte = *src_pte;
 	struct page *page;
+
+	if (mode == ORBIT_UPDATE_APPLY) {
+		struct snap_entry *s = snap_front(snap);
+		if (s == NULL && pte_present(pte))
+			printk("warning: orbit snapshot consumed, %p", dst_pte);
+		if (s == NULL || s->pte != dst_pte)
+			return 0;
+		pte = s->ptent;
+		snap_pop(snap);
+		goto out_set_pte;
+	}
 
 	/* pte contains position in swap or file, so copy. */
 	if (unlikely(!pte_present(pte))) {
@@ -4865,6 +4960,7 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		 * just skip. */
 		if (pte_same(*dst_pte, pte))
 			return 0;
+		panic("Orbit update has page in swap or file.");
 
 		swp_entry_t entry = pte_to_swp_entry(pte);
 
@@ -4935,7 +5031,7 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 			if (!pte_dirty(pte))
 				return 0;
 			/* src is dirty, copy */
-		} else {	/* Snapshot mode */
+		} else if (mode == ORBIT_UPDATE_SNAPSHOT) {	/* Snapshot mode */
 			/* If both are clean, nothing changed, just skip. */
 			if (!pte_dirty(pte) && pte_same(*dst_pte, pte))
 				return 0;
@@ -4971,6 +5067,10 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	}
 
 out_set_pte:
+	if (mode == ORBIT_UPDATE_MARK) {
+		snap_push(snap, dst_pte, pte);
+		return 0;
+	}
 	/* zap old dst pte mapping */
 	/* TODO: return value? */
 	zap_pte_one_orbit(tlb, rss, vma, dst_pmd, dst_pte, addr);
@@ -4982,7 +5082,7 @@ out_set_pte:
 static int update_pte_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		   pmd_t *dst_pmd, pmd_t *src_pmd, struct vm_area_struct *vma,
 		   unsigned long addr, unsigned long end, struct mmu_gather *tlb,
-		   enum update_mode mode)
+		   enum update_mode mode, struct vma_snapshot *snap)
 {
 	pte_t *orig_src_pte, *orig_dst_pte;
 	pte_t *src_pte, *dst_pte;
@@ -5027,7 +5127,7 @@ again:
 			continue;
 		}
 		entry.val = update_one_pte(dst_mm, src_mm, dst_pmd,
-				dst_pte, src_pte, vma, addr, rss, tlb, mode);
+				dst_pte, src_pte, vma, addr, rss, tlb, mode, snap);
 		if (entry.val)
 			break;
 		progress += 8;
@@ -5113,7 +5213,7 @@ again:
 static inline int update_pmd_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		pud_t *dst_pud, pud_t *src_pud, struct vm_area_struct *vma,
 		unsigned long addr, unsigned long end, struct mmu_gather *tlb,
-		enum update_mode mode)
+		enum update_mode mode, struct vma_snapshot *snap)
 {
 	pmd_t *src_pmd, *dst_pmd;
 	unsigned long next;
@@ -5140,7 +5240,7 @@ static inline int update_pmd_range(struct mm_struct *dst_mm, struct mm_struct *s
 		if (pmd_none_or_clear_bad(src_pmd))
 			continue;
 		if (update_pte_range(dst_mm, src_mm, dst_pmd, src_pmd,
-					vma, addr, next, tlb, mode))
+					vma, addr, next, tlb, mode, snap))
 			return -ENOMEM;
 	} while (dst_pmd++, src_pmd++, addr = next, addr != end);
 	return 0;
@@ -5149,7 +5249,7 @@ static inline int update_pmd_range(struct mm_struct *dst_mm, struct mm_struct *s
 static inline int update_pud_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		p4d_t *dst_p4d, p4d_t *src_p4d, struct vm_area_struct *vma,
 		unsigned long addr, unsigned long end, struct mmu_gather *tlb,
-		enum update_mode mode)
+		enum update_mode mode, struct vma_snapshot *snap)
 {
 	pud_t *src_pud, *dst_pud;
 	unsigned long next;
@@ -5176,7 +5276,7 @@ static inline int update_pud_range(struct mm_struct *dst_mm, struct mm_struct *s
 		if (pud_none_or_clear_bad(src_pud))
 			continue;
 		if (update_pmd_range(dst_mm, src_mm, dst_pud, src_pud,
-					vma, addr, next, tlb, mode))
+					vma, addr, next, tlb, mode, snap))
 			return -ENOMEM;
 	} while (dst_pud++, src_pud++, addr = next, addr != end);
 	return 0;
@@ -5185,7 +5285,7 @@ static inline int update_pud_range(struct mm_struct *dst_mm, struct mm_struct *s
 static inline int update_p4d_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		pgd_t *dst_pgd, pgd_t *src_pgd, struct vm_area_struct *vma,
 		unsigned long addr, unsigned long end, struct mmu_gather *tlb,
-		enum update_mode mode)
+		enum update_mode mode, struct vma_snapshot *snap)
 {
 	p4d_t *src_p4d, *dst_p4d;
 	unsigned long next;
@@ -5199,7 +5299,7 @@ static inline int update_p4d_range(struct mm_struct *dst_mm, struct mm_struct *s
 		if (p4d_none_or_clear_bad(src_p4d))
 			continue;
 		if (update_pud_range(dst_mm, src_mm, dst_p4d, src_p4d,
-					vma, addr, next, tlb, mode))
+					vma, addr, next, tlb, mode, snap))
 			return -ENOMEM;
 	} while (dst_p4d++, src_p4d++, addr = next, addr != end);
 	return 0;
@@ -5207,7 +5307,7 @@ static inline int update_p4d_range(struct mm_struct *dst_mm, struct mm_struct *s
 
 int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	struct vm_area_struct *vma, unsigned long addr, unsigned long end,
-	enum update_mode mode)
+	enum update_mode mode, struct vma_snapshot *snap)
 {
 	pgd_t *src_pgd, *dst_pgd;
 	unsigned long next;
@@ -5266,7 +5366,7 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		if (pgd_none_or_clear_bad(src_pgd))
 			continue;
 		if (unlikely(update_p4d_range(dst_mm, src_mm, dst_pgd, src_pgd,
-					    vma, addr, next, &tlb, mode))) {
+					    vma, addr, next, &tlb, mode, snap))) {
 			ret = -ENOMEM;
 			break;
 		}

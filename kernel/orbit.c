@@ -40,6 +40,21 @@ struct pool_range {
 	unsigned long end;
 };
 
+/* Duplicated struct definition, should be eventually moved to mm.h */
+struct vma_snapshot {
+	size_t count;
+	size_t head, tail;	/* Cursor in the first and last snap_block */
+	struct list_head list;
+};
+
+void snap_init(struct vma_snapshot *snap);
+void snap_destroy(struct vma_snapshot *snap);
+
+struct pool_snapshot {
+	unsigned long start, end;
+	struct vma_snapshot snapshot;
+};
+
 struct orbit_task {
 	unsigned long		taskid;		/* valid taskid starts from 1 */
 	unsigned long		flags;
@@ -59,9 +74,9 @@ struct orbit_task {
 	 * FIXME: Currently this is shared between update and update_v */
 	struct list_head	updates;
 
-	/* Memory ranges to be snapshotted. Variable-sized struct. */
+	/* Memory ranges snapshotted. Variable-sized struct. */
 	size_t			npool;
-	struct pool_range	pools[];
+	struct pool_snapshot	pools[];
 } __randomize_layout;
 
 struct orbit_info {
@@ -80,23 +95,14 @@ struct orbit_info {
 	struct orbit_task	*next_task;
 } __randomize_layout;
 
-struct orbit_pool {
-	void *rawptr;
-	size_t length;
-	size_t allocated;
-};
-
 static struct orbit_task *orbit_create_task(
 	unsigned long flags, void __user *arg,
-	size_t npool, struct orbit_pool __user ** pools)
+	size_t npool, struct pool_range __user * pools)
 {
 	struct orbit_task *new_task;
 	size_t i;
-	struct orbit_pool __user * user_pool;
-	void __user *rawptr;
-	unsigned long length;
 
-	new_task = kmalloc(sizeof(*new_task) + npool * sizeof(struct pool_range),
+	new_task = kmalloc(sizeof(*new_task) + npool * sizeof(struct pool_snapshot),
 		GFP_KERNEL);
 	if (new_task == NULL)
 		return NULL;
@@ -116,13 +122,12 @@ static struct orbit_task *orbit_create_task(
 
 	new_task->npool = npool;
 	/* TODO: check error of get_user */
-	/* FIXME: we should directly use pool_range in user space */
 	for (i = 0; i < npool; ++i) {
-		get_user(user_pool, pools + i);
-		get_user(rawptr, &user_pool->rawptr);
-		get_user(length, &user_pool->length);
-		new_task->pools[i].start = (unsigned long)rawptr;
-		new_task->pools[i].end = (unsigned long)rawptr + length;
+		get_user(new_task->pools[i].start, &pools[i].start);
+		get_user(new_task->pools[i].end, &pools[i].end);
+		/* Initialize new_task->pools[i].
+		 * Actual marking is done later in orbit_call. */
+		snap_init(&new_task->pools[i].snapshot);
 	}
 
 	return new_task;
@@ -158,17 +163,20 @@ static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
  * In async mode, this returns a taskid integer. */
 internalreturn orbit_call_internal(
 	unsigned long flags, unsigned long obid,
-	size_t npool, struct orbit_pool __user ** pools,
+	size_t npool, struct pool_range __user * pools,
 	void __user * arg)
 {
-	struct task_struct *ob;
+	struct task_struct *ob, *parent;
+	struct vm_area_struct *parent_vma;
 	struct orbit_info *info;
 	struct orbit_task *new_task;
 	unsigned long ret;
+	size_t i;
 
 	/* 1. Find the orbit context by obid, currently we only support one
 	 * orbit entity per process, thus we will ignore the obid. */
-	ob = current->group_leader->orbit_child;
+	parent = current->group_leader;
+	ob = parent->orbit_child;
 	info = ob->orbit_info;
 
 	/* 2. Create a orbit task struct and add to the orbit's task queue. */
@@ -181,6 +189,37 @@ internalreturn orbit_call_internal(
 	/* Add task to the queue */
 	/* TODO: make killable? */
 	mutex_lock(&info->task_lock);
+
+	if (down_write_killable(&parent->mm->mmap_sem)) {
+		ret = -EINTR;
+		panic("orbit return cannot acquire parent sem");
+	}
+	if (down_write_killable(&ob->mm->mmap_sem)) {
+		ret = -EINTR;
+		panic("orbit return cannot acquire orbit sem");
+	}
+
+	/* Serialized marking protected `task_lock`.
+	 * We do not allow parallel snapshotting in current design. */
+	for (i = 0; i < npool; ++i) {
+		struct pool_snapshot *pool = new_task->pools + i;
+
+		parent_vma = find_vma(parent->mm, pool->start);
+
+		if (0 && list_empty(&info->task_list)) {
+			ret = update_page_range(ob->mm, parent->mm, parent_vma,
+				pool->start, pool->end,
+				ORBIT_UPDATE_SNAPSHOT, NULL);
+		} else {
+			ret = update_page_range(ob->mm, parent->mm, parent_vma,
+				pool->start, pool->end,
+				ORBIT_UPDATE_MARK, &pool->snapshot);
+		}
+	}
+
+	up_write(&ob->mm->mmap_sem);
+	up_write(&parent->mm->mmap_sem);
+
 	/* Allocate taskid; valid taskid starts from 1 */
 	/* TODO: will this overflow? */
 	new_task->taskid = ++info->taskid_counter;
@@ -206,7 +245,7 @@ internalreturn orbit_call_internal(
 SYSCALL_DEFINE5(orbit_call, unsigned long, flags,
 		unsigned long, obid,
 		size_t, npool,
-		struct orbit_pool __user **, pools,
+		struct pool_range __user *, pools,
 		void __user *, arg)
 {
 	return orbit_call_internal(flags, obid, npool, pools, arg);
@@ -375,7 +414,7 @@ internalreturn orbit_return_internal(unsigned long retval)
 	struct orbit_info *info;
 	struct orbit_task *task;	/* Both old and new task. */
 	struct vm_area_struct *parent_vma /*, *ob_vma*/;
-	struct pool_range *pool;
+	struct pool_snapshot *pool;
 
 	if (!current->is_orbit)
 		return -EINVAL;
@@ -435,9 +474,9 @@ internalreturn orbit_return_internal(unsigned long retval)
 					NULL : list_next_entry(task, elem);
 	mutex_unlock(&info->task_lock);
 
-	if (down_write_killable(&parent->mm->mmap_sem)) {
+	if (down_write_killable(&ob->mm->mmap_sem)) {
 		retval = -EINTR;
-		panic("orbit return cannot acquire parent sem");
+		panic("orbit return cannot acquire orbit sem");
 	}
 
 	/* 2. Snapshot the page range */
@@ -466,12 +505,18 @@ internalreturn orbit_return_internal(unsigned long retval)
 		/* if (!(ob_vma->vm_start <= pool->start &&
 			pool->end <= ob_vma->vm_start))
 			snapshot_share(ob->mm, parent->mm, parent_vma); */
-		update_page_range(ob->mm, parent->mm, parent_vma,
-			pool->start, pool->end, ORBIT_UPDATE_SNAPSHOT);
+
+		printd("snapshot pte count is %d", pool->snapshot.count);
+		if (pool->snapshot.count != 0)
+			update_page_range(ob->mm, parent->mm, parent_vma,
+				pool->start, pool->end, ORBIT_UPDATE_APPLY,
+				&pool->snapshot);
+		printd("snapshot pte count left %d", pool->snapshot.count);
+		snap_destroy(&pool->snapshot);
 #endif
 	}
 
-	up_write(&parent->mm->mmap_sem);
+	up_write(&ob->mm->mmap_sem);
 
 	/* 3. Setup the user argument to call entry_func.
 	 * Current implementation is that the user runtime library passes
@@ -503,7 +548,7 @@ internalreturn do_orbit_commit(void)
 	struct orbit_task *task;	/* Both old and new task. */
 	struct vm_area_struct *ob_vma;
 	int ret;
-	struct pool_range *pool;
+	struct pool_snapshot *pool;
 
 	if (!current->is_orbit)
 		return -EINVAL;
@@ -518,7 +563,7 @@ internalreturn do_orbit_commit(void)
 	for (pool = task->pools; pool < task->pools + task->npool; ++pool) {
 		ob_vma = find_vma(ob->mm, pool->start);
 		ret = update_page_range(parent->mm, ob->mm, ob_vma,
-			pool->start, pool->end, ORBIT_UPDATE_DIRTY);
+			pool->start, pool->end, ORBIT_UPDATE_DIRTY, NULL);
 	}
 
 	return ret;
@@ -600,7 +645,7 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 
 	ob_vma = find_vma(ob->mm, scratch_start);
 	ret = update_page_range(parent->mm, ob->mm, ob_vma, scratch_start, scratch_end,
-		ORBIT_UPDATE_SNAPSHOT);
+		ORBIT_UPDATE_SNAPSHOT, NULL);
 
 	mutex_lock(&current_task->updates_lock);
 	refcount_inc(&current_task->refcount);
