@@ -192,11 +192,11 @@ internalreturn orbit_call_internal(
 
 	if (down_write_killable(&parent->mm->mmap_sem)) {
 		ret = -EINTR;
-		panic("orbit return cannot acquire parent sem");
+		panic("orbit call cannot acquire parent sem");
 	}
 	if (down_write_killable(&ob->mm->mmap_sem)) {
 		ret = -EINTR;
-		panic("orbit return cannot acquire orbit sem");
+		panic("orbit call cannot acquire orbit sem");
 	}
 
 	/* Serialized marking protected `task_lock`.
@@ -474,6 +474,10 @@ internalreturn orbit_return_internal(unsigned long retval)
 					NULL : list_next_entry(task, elem);
 	mutex_unlock(&info->task_lock);
 
+	if (down_write_killable(&parent->mm->mmap_sem)) {
+		retval = -EINTR;
+		panic("orbit return cannot acquire parent sem");
+	}
 	if (down_write_killable(&ob->mm->mmap_sem)) {
 		retval = -EINTR;
 		panic("orbit return cannot acquire orbit sem");
@@ -517,6 +521,7 @@ internalreturn orbit_return_internal(unsigned long retval)
 	}
 
 	up_write(&ob->mm->mmap_sem);
+	up_write(&parent->mm->mmap_sem);
 
 	/* 3. Setup the user argument to call entry_func.
 	 * Current implementation is that the user runtime library passes
@@ -672,6 +677,7 @@ internalreturn do_orbit_recvv(union orbit_result __user *result,
 	int ret;
 	struct list_head *iter;
 	int found = 0;
+	int list_count = 0;
 
 	parent = current->group_leader;
 	ob = parent->orbit_child;
@@ -683,6 +689,7 @@ internalreturn do_orbit_recvv(union orbit_result __user *result,
 	/* TODO: maybe use rbtree along with the list? */
 	mutex_lock(&info->task_lock);
 	list_for_each(iter, &info->task_list) {
+		++list_count;
 		task = list_entry(iter, struct orbit_task, elem);
 		if (task->taskid == taskid) {
 			found = 1;
@@ -690,6 +697,9 @@ internalreturn do_orbit_recvv(union orbit_result __user *result,
 		}
 	}
 	mutex_unlock(&info->task_lock);
+
+	if (list_count > 100)
+		printk("warning: orbit list size %d", list_count);
 
 	if (!found) {
 		printk("taskid %lu not found", taskid);
@@ -727,10 +737,13 @@ internalreturn do_orbit_recvv(union orbit_result __user *result,
 	mutex_unlock(&task->updates_lock);
 
 	/* ARC free task object */
-	if (ret == 0 && refcount_dec_and_test(&task->refcount) == 1 &&
-		down_trylock(&task->finish) == 0)
+	/* if (ret == 0 && refcount_dec_and_test(&task->refcount) == 1 &&
+		down_trylock(&task->finish) == 0) */
+	if (ret == 0 && down_trylock(&task->finish) == 0)
 	{
+		mutex_lock(&info->task_lock);
 		list_del(&task->elem);
+		mutex_unlock(&info->task_lock);
 		kfree(task);
 	}
 

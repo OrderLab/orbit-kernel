@@ -5377,5 +5377,8 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 
 	tlb_finish_mmu(&tlb, addr, end);
 
+	if (mode != ORBIT_UPDATE_APPLY)
+		flush_tlb_range(vma, addr, end);
+
 	return ret;
 }
