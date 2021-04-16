@@ -167,7 +167,7 @@ internalreturn orbit_call_internal(
 	void __user * arg)
 {
 	struct task_struct *ob, *parent;
-	struct vm_area_struct *parent_vma;
+	struct vm_area_struct *ob_vma, *parent_vma;
 	struct orbit_info *info;
 	struct orbit_task *new_task;
 	unsigned long ret;
@@ -186,39 +186,38 @@ internalreturn orbit_call_internal(
 
 	printd("arg = %p, new_task->arg = %p\n", arg, new_task->arg);
 
-	/* Add task to the queue */
-	/* TODO: make killable? */
-	mutex_lock(&info->task_lock);
-
+	/* Serialized marking protected parent mmap_sem.
+	 * We do not allow parallel snapshotting in current design. */
 	if (down_write_killable(&parent->mm->mmap_sem)) {
 		ret = -EINTR;
 		panic("orbit call cannot acquire parent sem");
 	}
-	if (down_write_killable(&ob->mm->mmap_sem)) {
-		ret = -EINTR;
-		panic("orbit call cannot acquire orbit sem");
-	}
 
-	/* Serialized marking protected `task_lock`.
-	 * We do not allow parallel snapshotting in current design. */
 	for (i = 0; i < npool; ++i) {
 		struct pool_snapshot *pool = new_task->pools + i;
 
 		parent_vma = find_vma(parent->mm, pool->start);
 
 		if (0 && list_empty(&info->task_list)) {
-			ret = update_page_range(ob->mm, parent->mm, parent_vma,
+			/* FIXME: we need ob lock */
+			ob_vma = find_vma(ob->mm, pool->start);
+			ret = update_page_range(ob->mm, parent->mm,
+				ob_vma, parent_vma,
 				pool->start, pool->end,
 				ORBIT_UPDATE_SNAPSHOT, NULL);
 		} else {
-			ret = update_page_range(ob->mm, parent->mm, parent_vma,
+			ret = update_page_range(NULL, parent->mm,
+				NULL, parent_vma,
 				pool->start, pool->end,
 				ORBIT_UPDATE_MARK, &pool->snapshot);
 		}
 	}
 
-	up_write(&ob->mm->mmap_sem);
 	up_write(&parent->mm->mmap_sem);
+
+	/* Add task to the queue */
+	/* TODO: make killable? */
+	mutex_lock(&info->task_lock);
 
 	/* Allocate taskid; valid taskid starts from 1 */
 	/* TODO: will this overflow? */
@@ -413,7 +412,7 @@ internalreturn orbit_return_internal(unsigned long retval)
 	struct task_struct *ob, *parent;
 	struct orbit_info *info;
 	struct orbit_task *task;	/* Both old and new task. */
-	struct vm_area_struct *parent_vma /*, *ob_vma*/;
+	struct vm_area_struct *ob_vma;
 	struct pool_snapshot *pool;
 
 	if (!current->is_orbit)
@@ -474,10 +473,6 @@ internalreturn orbit_return_internal(unsigned long retval)
 					NULL : list_next_entry(task, elem);
 	mutex_unlock(&info->task_lock);
 
-	if (down_write_killable(&parent->mm->mmap_sem)) {
-		retval = -EINTR;
-		panic("orbit return cannot acquire parent sem");
-	}
 	if (down_write_killable(&ob->mm->mmap_sem)) {
 		retval = -EINTR;
 		panic("orbit return cannot acquire orbit sem");
@@ -486,42 +481,41 @@ internalreturn orbit_return_internal(unsigned long retval)
 	/* 2. Snapshot the page range */
 	for (pool = task->pools; pool < task->pools + task->npool; ++pool) {
 		/* TODO: vma return value error handling */
-		parent_vma = find_vma(parent->mm, pool->start);
+		ob_vma = find_vma(ob->mm, pool->start);
 		/* vma_interval_tree_iter_first() */
 		/* Currently we assume that the range will only be in one vma */
-		whatis(parent_vma->vm_start);
-		whatis(parent_vma->vm_end);
+		whatis(ob_vma->vm_start);
+		whatis(ob_vma->vm_end);
 		whatis(pool->start);
 		whatis(pool->end);
 
-		if (!(parent_vma->vm_start <= pool->start &&
-			pool->end <= parent_vma->vm_end)) {
+		if (!(ob_vma->vm_start <= pool->start &&
+			pool->end <= ob_vma->vm_end)) {
 			/* TODO: cleanup  */
 			panic("orbit error handling unimplemented!");
 		}
 		/* TODO: Update orbit vma list */
 		/* Copy page range */
 #if DBG
-		copy_page_range(ob->mm, parent->mm, parent_vma);
+		panic("orbit cannot use parent_vma in debug mode");
+		/* copy_page_range(ob->mm, parent->mm, parent_vma); */
 #else
-		/* ob_vma = find_vma(ob->mm, pool->start); */
 		/* FIXME: snapshot_share does not work with implicit vma_share */
 		/* if (!(ob_vma->vm_start <= pool->start &&
 			pool->end <= ob_vma->vm_start))
 			snapshot_share(ob->mm, parent->mm, parent_vma); */
 
-		printd("snapshot pte count is %d", pool->snapshot.count);
+		printd("snapshot pte count is %ld", pool->snapshot.count);
 		if (pool->snapshot.count != 0)
-			update_page_range(ob->mm, parent->mm, parent_vma,
+			update_page_range(ob->mm, NULL, ob_vma, NULL,
 				pool->start, pool->end, ORBIT_UPDATE_APPLY,
 				&pool->snapshot);
-		printd("snapshot pte count left %d", pool->snapshot.count);
+		printd("snapshot pte count left %ld", pool->snapshot.count);
 		snap_destroy(&pool->snapshot);
 #endif
 	}
 
 	up_write(&ob->mm->mmap_sem);
-	up_write(&parent->mm->mmap_sem);
 
 	/* 3. Setup the user argument to call entry_func.
 	 * Current implementation is that the user runtime library passes
@@ -551,7 +545,7 @@ internalreturn do_orbit_commit(void)
 	struct task_struct *ob, *parent;
 	struct orbit_info *info;
 	struct orbit_task *task;	/* Both old and new task. */
-	struct vm_area_struct *ob_vma;
+	struct vm_area_struct *ob_vma, *parent_vma;
 	int ret;
 	struct pool_snapshot *pool;
 
@@ -567,8 +561,10 @@ internalreturn do_orbit_commit(void)
 
 	for (pool = task->pools; pool < task->pools + task->npool; ++pool) {
 		ob_vma = find_vma(ob->mm, pool->start);
-		ret = update_page_range(parent->mm, ob->mm, ob_vma,
-			pool->start, pool->end, ORBIT_UPDATE_DIRTY, NULL);
+		parent_vma = find_vma(parent->mm, pool->start);
+		ret = update_page_range(parent->mm, ob->mm,
+			parent_vma, ob_vma, pool->start, pool->end,
+			ORBIT_UPDATE_DIRTY, NULL);
 	}
 
 	return ret;
@@ -614,7 +610,7 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 	struct task_struct *ob, *parent;
 	struct orbit_info *info;
 	struct orbit_task *current_task;	/* Both old and new task. */
-	struct vm_area_struct *ob_vma;
+	struct vm_area_struct *ob_vma, *parent_vma;
 	int ret = 0;
 	struct orbit_update_v *new_update;
 	unsigned long scratch_start, scratch_end;
@@ -648,8 +644,11 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 	scratch_start = (unsigned long)new_update->userdata.ptr;
 	scratch_end = scratch_start + new_update->userdata.size_limit;
 
+	/* FIXME: synchronization */
 	ob_vma = find_vma(ob->mm, scratch_start);
-	ret = update_page_range(parent->mm, ob->mm, ob_vma, scratch_start, scratch_end,
+	parent_vma = find_vma(parent->mm, scratch_start);
+	ret = update_page_range(parent->mm, ob->mm, parent_vma, ob_vma,
+		scratch_start, scratch_end,
 		ORBIT_UPDATE_SNAPSHOT, NULL);
 
 	mutex_lock(&current_task->updates_lock);

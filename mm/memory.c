@@ -4842,8 +4842,8 @@ static unsigned long zap_pte_one_orbit(struct mmu_gather *tlb, int *rss,
 }
 
 struct snap_entry {
-	pte_t *pte;	/* PTE pointer */
-	pte_t ptent;	/* PTE value */
+	unsigned long	addr;	/* virtual address */
+	pte_t		ptent;	/* PTE value */
 };
 
 /* Deque structure */
@@ -4874,7 +4874,7 @@ void snap_destroy(struct vma_snapshot *snap)
 	struct snap_block *block;
 
 	if (snap->count != 0)
-		panic("Orbit snap not all applied");
+		panic("Orbit snap apply left %ld", snap->count);
 
 	while (!list_empty(&snap->list)) {
 		block = list_first_entry(&snap->list, struct snap_block, elem);
@@ -4883,12 +4883,17 @@ void snap_destroy(struct vma_snapshot *snap)
 	}
 }
 
-void snap_push(struct vma_snapshot *snap, pte_t *pte, pte_t ptent)
+static inline bool snap_empty(struct vma_snapshot *snap)
+{
+	return snap->count == 0;
+}
+
+void snap_push(struct vma_snapshot *snap, unsigned long addr, pte_t ptent)
 {
 	struct snap_block *block;
 
 	if (!(pte_present(ptent) && !pte_write(ptent)))
-		panic("marked pte should be present & RO %p %lx", pte, ptent);
+		panic("marked pte should be present & RO %016lx %016lx", addr, pte_val(ptent));
 
 	++snap->count;
 	if (list_empty(&snap->list) || snap->tail == ARRSIZE) {
@@ -4899,7 +4904,7 @@ void snap_push(struct vma_snapshot *snap, pte_t *pte, pte_t ptent)
 	} else {
 		block = list_last_entry(&snap->list, struct snap_block, elem);
 	}
-	block->array[snap->tail++] = (struct snap_entry){ pte, ptent };
+	block->array[snap->tail++] = (struct snap_entry){ addr, ptent };
 }
 
 struct snap_entry *snap_front(struct vma_snapshot *snap)
@@ -4927,25 +4932,29 @@ void snap_pop(struct vma_snapshot *snap)
 
 static inline unsigned long
 update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
-		pmd_t *dst_pmd, pte_t *dst_pte, pte_t *src_pte,
-		struct vm_area_struct *vma, unsigned long addr,
-		int *rss, struct mmu_gather *tlb, enum update_mode mode,
-		struct vma_snapshot *snap)
+	pmd_t *dst_pmd, pte_t *dst_pte, pte_t *src_pte,
+	struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
+	unsigned long addr, int *rss,
+	struct mmu_gather *tlb, enum update_mode mode,
+	struct vma_snapshot *snap)
 {
-	unsigned long vm_flags = vma->vm_flags;
-	pte_t pte = *src_pte;
+	unsigned long vm_flags;
+	pte_t pte;
 	struct page *page;
 
 	if (mode == ORBIT_UPDATE_APPLY) {
 		struct snap_entry *s = snap_front(snap);
-		if (s == NULL && pte_present(pte))
+		if (s == NULL)
 			printk("warning: orbit snapshot consumed, %p", dst_pte);
-		if (s == NULL || s->pte != dst_pte)
+		if (s == NULL || s->addr != addr)
 			return 0;
 		pte = s->ptent;
 		snap_pop(snap);
 		goto out_set_pte;
 	}
+
+	pte = *src_pte;
+	vm_flags = src_vma->vm_flags;
 
 	/* pte contains position in swap or file, so copy. */
 	if (unlikely(!pte_present(pte))) {
@@ -4954,13 +4963,16 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		/* TODO: support swap or file. */
 		if (mode == ORBIT_UPDATE_DIRTY)
 			return 0;
-
-		/* Snapshot mode */
-		/* The entry is not present and the same, nothing changed,
-		 * just skip. */
-		if (pte_same(*dst_pte, pte))
-			return 0;
-		panic("Orbit update has page in swap or file.");
+		else if (mode == ORBIT_UPDATE_SNAPSHOT) {
+			/* Snapshot mode */
+			/* The entry is not present and the same, nothing changed,
+			 * just skip. */
+			if (pte_same(*dst_pte, pte))
+				return 0;
+			panic("Orbit update has page in swap or file.");
+		} else if (mode == ORBIT_UPDATE_MARK) {
+			panic("Orbit mark with src in swap not supported: %016lx.", pte_val(pte));
+		}
 
 		swp_entry_t entry = pte_to_swp_entry(pte);
 
@@ -5037,6 +5049,8 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 				return 0;
 			/* Otherwise, either is dirty, or dst is not present,
 			 * always update dst. */
+		} else if (mode == ORBIT_UPDATE_MARK) {
+			/* fall through */
 		}
 	}
 
@@ -5057,7 +5071,7 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		pte = pte_mkclean(pte);
 	pte = pte_mkold(pte);
 
-	page = vm_normal_page(vma, addr, pte);
+	page = vm_normal_page(src_vma, addr, pte);
 	if (page) {
 		get_page(page);
 		page_dup_rmap(page, false);
@@ -5068,21 +5082,24 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 
 out_set_pte:
 	if (mode == ORBIT_UPDATE_MARK) {
-		snap_push(snap, dst_pte, pte);
+		snap_push(snap, addr, pte);
 		return 0;
 	}
 	/* zap old dst pte mapping */
 	/* TODO: return value? */
-	zap_pte_one_orbit(tlb, rss, vma, dst_pmd, dst_pte, addr);
+	/* TODO: optimize same pte for APPLY */
+	zap_pte_one_orbit(tlb, rss, dst_vma, dst_pmd, dst_pte, addr);
 
 	set_pte_at(dst_mm, addr, dst_pte, pte);
 	return 0;
 }
 
-static int update_pte_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
-		   pmd_t *dst_pmd, pmd_t *src_pmd, struct vm_area_struct *vma,
-		   unsigned long addr, unsigned long end, struct mmu_gather *tlb,
-		   enum update_mode mode, struct vma_snapshot *snap)
+static int update_pte_range(
+	struct mm_struct *dst_mm, struct mm_struct *src_mm,
+	pmd_t *dst_pmd, pmd_t *src_pmd,
+	struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
+	unsigned long addr, unsigned long end, struct mmu_gather *tlb,
+	enum update_mode mode, struct vma_snapshot *snap)
 {
 	pte_t *orig_src_pte, *orig_dst_pte;
 	pte_t *src_pte, *dst_pte;
@@ -5092,22 +5109,30 @@ static int update_pte_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	swp_entry_t entry = (swp_entry_t){0};
 
 	/* zap operations */
-	tlb_change_page_size(tlb, PAGE_SIZE);
+	if (dst_mm)
+		tlb_change_page_size(tlb, PAGE_SIZE);
 
 again:
 	init_rss_vec(rss);
 
-	dst_pte = pte_alloc_map_lock(dst_mm, dst_pmd, addr, &dst_ptl);
-	if (!dst_pte)
-		return -ENOMEM;
-	src_pte = pte_offset_map(src_pmd, addr);
-	src_ptl = pte_lockptr(src_mm, src_pmd);
-	spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
+	if (dst_mm) {
+		dst_pte = pte_alloc_map_lock(dst_mm, dst_pmd, addr, &dst_ptl);
+		if (!dst_pte)
+			return -ENOMEM;
+	} else {
+		dst_pte = NULL;
+		dst_ptl = NULL;
+	}
+	src_pte = src_mm ? pte_offset_map(src_pmd, addr) : NULL;
+	src_ptl = src_mm ? pte_lockptr(src_mm, src_pmd) : NULL;
+	if (src_mm)
+		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 	orig_src_pte = src_pte;
 	orig_dst_pte = dst_pte;
 
 	/* zap operations */
-	flush_tlb_batched_pending(tlb->mm);
+	if (dst_mm)
+		flush_tlb_batched_pending(tlb->mm);
 
 	arch_enter_lazy_mmu_mode();
 
@@ -5119,30 +5144,42 @@ again:
 		if (progress >= 32) {
 			progress = 0;
 			if (need_resched() ||
-			    spin_needbreak(src_ptl) || spin_needbreak(dst_ptl))
+			    (src_ptl && spin_needbreak(src_ptl)) ||
+			    (dst_ptl && spin_needbreak(dst_ptl)))
 				break;
 		}
-		if (pte_none(*src_pte)) {
+		if (src_pte && pte_none(*src_pte)) {
 			progress++;
 			continue;
 		}
+		if (mode == ORBIT_UPDATE_APPLY && snap_empty(snap)) {
+			addr = end;
+			break;
+		}
 		entry.val = update_one_pte(dst_mm, src_mm, dst_pmd,
-				dst_pte, src_pte, vma, addr, rss, tlb, mode, snap);
+				dst_pte, src_pte, dst_vma, src_vma,
+				addr, rss, tlb, mode, snap);
 		if (entry.val)
 			break;
 		progress += 8;
-	} while (dst_pte++, src_pte++, addr += PAGE_SIZE, addr != end);
+	} while ((dst_pte ? dst_pte++ : NULL), (src_pte ? src_pte++ : NULL),
+		addr += PAGE_SIZE, addr != end);
 
 	arch_leave_lazy_mmu_mode();
-	spin_unlock(src_ptl);
-	pte_unmap(orig_src_pte);
-	add_mm_rss_vec(dst_mm, rss);
+	if (src_ptl)
+		spin_unlock(src_ptl);
+	if (orig_src_pte)
+		pte_unmap(orig_src_pte);
+	/* TODO: apply rss to snap */
+	if (dst_mm)
+		add_mm_rss_vec(dst_mm, rss);
 
 	/* zap operations */
 	/* if (force_flush)
 		tlb_flush_mmu_tlbonly(tlb); */
 
-	pte_unmap_unlock(orig_dst_pte, dst_ptl);
+	if (orig_dst_pte)
+		pte_unmap_unlock(orig_dst_pte, dst_ptl);
 	cond_resched();
 
 	if (entry.val) {
@@ -5210,103 +5247,126 @@ again:
 }
 #endif
 
-static inline int update_pmd_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
-		pud_t *dst_pud, pud_t *src_pud, struct vm_area_struct *vma,
-		unsigned long addr, unsigned long end, struct mmu_gather *tlb,
-		enum update_mode mode, struct vma_snapshot *snap)
+static inline int update_pmd_range(
+	struct mm_struct *dst_mm, struct mm_struct *src_mm,
+	pud_t *dst_pud, pud_t *src_pud,
+	struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
+	unsigned long addr, unsigned long end, struct mmu_gather *tlb,
+	enum update_mode mode, struct vma_snapshot *snap)
 {
 	pmd_t *src_pmd, *dst_pmd;
 	unsigned long next;
 
-	dst_pmd = pmd_alloc(dst_mm, dst_pud, addr);
-	if (!dst_pmd)
+	dst_pmd = dst_mm ? pmd_alloc(dst_mm, dst_pud, addr) : NULL;
+	if (dst_mm && !dst_pmd)
 		return -ENOMEM;
-	src_pmd = pmd_offset(src_pud, addr);
+	src_pmd = src_mm ? pmd_offset(src_pud, addr) : NULL;
 	do {
 		next = pmd_addr_end(addr, end);
-		if (is_swap_pmd(*src_pmd) || pmd_trans_huge(*src_pmd)
-			|| pmd_devmap(*src_pmd)) {
+		/* TODO: huge page */
+		if (src_pmd && dst_pmd &&
+			(is_swap_pmd(*src_pmd) || pmd_trans_huge(*src_pmd)
+			|| pmd_devmap(*src_pmd))) {
 			int err;
-			VM_BUG_ON_VMA(next-addr != HPAGE_PMD_SIZE, vma);
+			VM_BUG_ON_VMA(next-addr != HPAGE_PMD_SIZE, src_vma);
 			/* FIXME: handle huge pages */
 			err = copy_huge_pmd(dst_mm, src_mm,
-					    dst_pmd, src_pmd, addr, vma);
+					    dst_pmd, src_pmd, addr, src_vma);
 			if (err == -ENOMEM)
 				return -ENOMEM;
 			if (!err)
 				continue;
 			/* fall through */
 		}
-		if (pmd_none_or_clear_bad(src_pmd))
+		if (src_pmd && pmd_none_or_clear_bad(src_pmd))
 			continue;
+		/* Check snap and skip */
+		if (mode == ORBIT_UPDATE_APPLY && snap_empty(snap))
+			break;
 		if (update_pte_range(dst_mm, src_mm, dst_pmd, src_pmd,
-					vma, addr, next, tlb, mode, snap))
+			dst_vma, src_vma, addr, next, tlb, mode, snap))
 			return -ENOMEM;
-	} while (dst_pmd++, src_pmd++, addr = next, addr != end);
+	} while ((dst_pmd ? dst_pmd++ : NULL), (src_pmd ? src_pmd++ : NULL),
+		addr = next, addr != end);
 	return 0;
 }
 
-static inline int update_pud_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
-		p4d_t *dst_p4d, p4d_t *src_p4d, struct vm_area_struct *vma,
-		unsigned long addr, unsigned long end, struct mmu_gather *tlb,
-		enum update_mode mode, struct vma_snapshot *snap)
+static inline int update_pud_range(
+	struct mm_struct *dst_mm, struct mm_struct *src_mm,
+	p4d_t *dst_p4d, p4d_t *src_p4d,
+	struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
+	unsigned long addr, unsigned long end, struct mmu_gather *tlb,
+	enum update_mode mode, struct vma_snapshot *snap)
 {
 	pud_t *src_pud, *dst_pud;
 	unsigned long next;
 
-	dst_pud = pud_alloc(dst_mm, dst_p4d, addr);
-	if (!dst_pud)
+	dst_pud = dst_mm ? pud_alloc(dst_mm, dst_p4d, addr) : NULL;
+	if (dst_mm && !dst_pud)
 		return -ENOMEM;
-	src_pud = pud_offset(src_p4d, addr);
+	src_pud = src_mm ? pud_offset(src_p4d, addr) : NULL;
 	do {
 		next = pud_addr_end(addr, end);
-		if (pud_trans_huge(*src_pud) || pud_devmap(*src_pud)) {
+		/* TODO: huge page */
+		if (src_pud && dst_pud &&
+			(pud_trans_huge(*src_pud) || pud_devmap(*src_pud))) {
 			int err;
 
-			VM_BUG_ON_VMA(next-addr != HPAGE_PUD_SIZE, vma);
+			VM_BUG_ON_VMA(next-addr != HPAGE_PUD_SIZE, src_vma);
 			/* TODO: handle huge pages */
 			err = copy_huge_pud(dst_mm, src_mm,
-					    dst_pud, src_pud, addr, vma);
+					    dst_pud, src_pud, addr, src_vma);
 			if (err == -ENOMEM)
 				return -ENOMEM;
 			if (!err)
 				continue;
 			/* fall through */
 		}
-		if (pud_none_or_clear_bad(src_pud))
+		if (src_pud && pud_none_or_clear_bad(src_pud))
 			continue;
+		/* Check snap and skip */
+		if (mode == ORBIT_UPDATE_APPLY && snap_empty(snap))
+			break;
 		if (update_pmd_range(dst_mm, src_mm, dst_pud, src_pud,
-					vma, addr, next, tlb, mode, snap))
+			dst_vma, src_vma, addr, next, tlb, mode, snap))
 			return -ENOMEM;
-	} while (dst_pud++, src_pud++, addr = next, addr != end);
+	} while ((dst_pud ? dst_pud++ : NULL), (src_pud ? src_pud++ : NULL),
+		addr = next, addr != end);
 	return 0;
 }
 
-static inline int update_p4d_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
-		pgd_t *dst_pgd, pgd_t *src_pgd, struct vm_area_struct *vma,
-		unsigned long addr, unsigned long end, struct mmu_gather *tlb,
-		enum update_mode mode, struct vma_snapshot *snap)
+static inline int update_p4d_range(
+	struct mm_struct *dst_mm, struct mm_struct *src_mm,
+	pgd_t *dst_pgd, pgd_t *src_pgd,
+	struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
+	unsigned long addr, unsigned long end, struct mmu_gather *tlb,
+	enum update_mode mode, struct vma_snapshot *snap)
 {
 	p4d_t *src_p4d, *dst_p4d;
 	unsigned long next;
 
-	dst_p4d = p4d_alloc(dst_mm, dst_pgd, addr);
-	if (!dst_p4d)
+	dst_p4d = dst_mm ? p4d_alloc(dst_mm, dst_pgd, addr) : NULL;
+	if (dst_mm && !dst_p4d)
 		return -ENOMEM;
-	src_p4d = p4d_offset(src_pgd, addr);
+	src_p4d = src_mm ? p4d_offset(src_pgd, addr) : NULL;
 	do {
 		next = p4d_addr_end(addr, end);
-		if (p4d_none_or_clear_bad(src_p4d))
+		if (src_p4d && p4d_none_or_clear_bad(src_p4d))
 			continue;
+		/* Check snap and skip */
+		if (mode == ORBIT_UPDATE_APPLY && snap_empty(snap))
+			break;
 		if (update_pud_range(dst_mm, src_mm, dst_p4d, src_p4d,
-					vma, addr, next, tlb, mode, snap))
+			dst_vma, src_vma, addr, next, tlb, mode, snap))
 			return -ENOMEM;
-	} while (dst_p4d++, src_p4d++, addr = next, addr != end);
+	} while ((dst_p4d ? dst_p4d++ : NULL), (src_p4d ? src_p4d++ : NULL),
+		addr = next, addr != end);
 	return 0;
 }
 
 int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
-	struct vm_area_struct *vma, unsigned long addr, unsigned long end,
+	struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
+	unsigned long addr, unsigned long end,
 	enum update_mode mode, struct vma_snapshot *snap)
 {
 	pgd_t *src_pgd, *dst_pgd;
@@ -5318,27 +5378,37 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	/* Variables to free up dst entries */
 	struct mmu_gather tlb;
 
+	/* TODO: check pointers validity */
+	if (mode == ORBIT_UPDATE_APPLY)
+		src_mm = NULL, src_vma = NULL;
+	else if (mode == ORBIT_UPDATE_MARK)
+		dst_mm = NULL, dst_vma = NULL;
+
 	lru_add_drain();
-	tlb_gather_mmu(&tlb, dst_mm, addr, end);
-	update_hiwater_rss(dst_mm);
+	if (dst_mm != NULL) {
+		tlb_gather_mmu(&tlb, dst_mm, addr, end);
+		update_hiwater_rss(dst_mm);
+	}
 
 	/* unmap_vmas(&tlb, vma, addr, end); */
 
 	/* Currently we assume that the range will only be in one vma.
 	 * This check was also done in the orbit_call. Ideally, we will
 	 * modify this function to allow memory range across multiple vmas. */
-	if (!(vma->vm_start <= addr && end <= vma->vm_end))
+
+	/* FIXME: we still need to check this somewhere */
+	if (src_vma && !(src_vma->vm_start <= addr && end <= src_vma->vm_end))
 		return -EINVAL;
 
 	/* TODO: handle VM_HUGETLB | VM_PFNMAP | VM_MIXEDMAP */
 
-	if (unlikely(vma->vm_flags & VM_PFNMAP)) {
+	if (src_vma && unlikely(src_vma->vm_flags & VM_PFNMAP)) {
 		return -EINVAL;
 		/*
 		 * We do not free on error cases below as remove_vma
 		 * gets called on error from higher level routine
 		 */
-		/* ret = track_pfn_copy(vma);
+		/* ret = track_pfn_copy(src_vma);
 		if (ret)
 			return ret; */
 	}
@@ -5350,35 +5420,43 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	 * parent mm. And a permission downgrade will only happen if
 	 * is_cow_mapping() returns true.
 	 */
-	is_cow = is_cow_mapping(vma->vm_flags);
+	is_cow = src_vma ? is_cow_mapping(src_vma->vm_flags) : false;
 
 	if (is_cow) {
 		mmu_notifier_range_init(&range, MMU_NOTIFY_PROTECTION_PAGE,
-					0, vma, src_mm, addr, end);
+					0, src_vma, src_mm, addr, end);
 		mmu_notifier_invalidate_range_start(&range);
 	}
 
 	ret = 0;
-	dst_pgd = pgd_offset(dst_mm, addr);
-	src_pgd = pgd_offset(src_mm, addr);
+	dst_pgd = dst_mm ? pgd_offset(dst_mm, addr) : NULL;
+	src_pgd = src_mm ? pgd_offset(src_mm, addr) : NULL;
 	do {
 		next = pgd_addr_end(addr, end);
-		if (pgd_none_or_clear_bad(src_pgd))
+		if (src_pgd && pgd_none_or_clear_bad(src_pgd))
 			continue;
-		if (unlikely(update_p4d_range(dst_mm, src_mm, dst_pgd, src_pgd,
-					    vma, addr, next, &tlb, mode, snap))) {
+		/* Check snap and skip */
+		if (mode == ORBIT_UPDATE_APPLY && snap_empty(snap))
+			break;
+		if (unlikely(update_p4d_range(dst_mm, src_mm,
+			dst_pgd, src_pgd, dst_vma, src_vma,
+			addr, next, &tlb, mode, snap))) {
 			ret = -ENOMEM;
 			break;
 		}
-	} while (dst_pgd++, src_pgd++, addr = next, addr != end);
+	} while ((dst_pgd ? dst_pgd++ : NULL), (src_pgd ? src_pgd++ : NULL),
+		addr = next, addr != end);
 
 	if (is_cow)
 		mmu_notifier_invalidate_range_end(&range);
 
-	tlb_finish_mmu(&tlb, addr, end);
+	if (dst_mm != NULL) {
+		flush_tlb_range(dst_vma, addr, end);
+		tlb_finish_mmu(&tlb, addr, end);
+	}
 
-	if (mode != ORBIT_UPDATE_APPLY)
-		flush_tlb_range(vma, addr, end);
+	if (src_mm != NULL)
+		flush_tlb_range(src_vma, addr, end);
 
 	return ret;
 }

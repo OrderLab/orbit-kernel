@@ -1472,7 +1472,8 @@ enum update_mode { ORBIT_UPDATE_SNAPSHOT, ORBIT_UPDATE_DIRTY,
 struct vma_snapshot;
 /* Orbit helper function: update dst mm according to specific range in src mm */
 int update_page_range(struct mm_struct *dst, struct mm_struct *src,
-	struct vm_area_struct *vma, unsigned long addr, unsigned long end,
+	struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
+	unsigned long addr, unsigned long end,
 	enum update_mode mode, struct vma_snapshot *snap);
 
 int follow_pte_pmd(struct mm_struct *mm, unsigned long address,
