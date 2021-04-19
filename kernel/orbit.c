@@ -41,14 +41,24 @@ struct pool_range {
 };
 
 /* Duplicated struct definition, should be eventually moved to mm.h */
-struct vma_snapshot {
-	size_t count;
-	size_t head, tail;	/* Cursor in the first and last snap_block */
-	struct list_head list;
+struct snap_block;
+
+struct snap_slot {
+	atomic_t		in_use;
+	struct snap_block	*block;
 };
 
-void snap_init(struct vma_snapshot *snap);
+struct vma_snapshot {
+	size_t			count;
+	/* Cursor in the first and last snap_block */
+	size_t			head, tail;
+	struct list_head	list;
+	struct snap_slot	*slots;	/* Same pointer as in orbit_info */
+};
+
+void snap_init(struct vma_snapshot *snap, struct snap_slot *slots);
 void snap_destroy(struct vma_snapshot *snap);
+struct snap_slot *snap_create_slots(void);
 
 struct pool_snapshot {
 	unsigned long start, end;
@@ -93,11 +103,14 @@ struct orbit_info {
 	/* Pointer to the next task. NULL when queue is empty. This field will
 	 * be updated when inserting or popping a task into/from the queue. */
 	struct orbit_task	*next_task;
+
+	struct snap_slot	snap_slots[16];
 } __randomize_layout;
 
 static struct orbit_task *orbit_create_task(
 	unsigned long flags, void __user *arg,
-	size_t npool, struct pool_range __user * pools)
+	size_t npool, struct pool_range __user * pools,
+	struct snap_slot *slots)
 {
 	struct orbit_task *new_task;
 	size_t i;
@@ -127,7 +140,7 @@ static struct orbit_task *orbit_create_task(
 		get_user(new_task->pools[i].end, &pools[i].end);
 		/* Initialize new_task->pools[i].
 		 * Actual marking is done later in orbit_call. */
-		snap_init(&new_task->pools[i].snapshot);
+		snap_init(&new_task->pools[i].snapshot, slots);
 	}
 
 	return new_task;
@@ -147,6 +160,7 @@ struct orbit_info *orbit_create_info(void __user **argptr)
 	info->current_task = info->next_task = NULL;
 	info->argptr = argptr;
 	info->taskid_counter = 0;	/* valid taskid starts from 1 */
+	memset(info->snap_slots, 0, sizeof(info->snap_slots));
 
 	return info;
 }
@@ -180,7 +194,7 @@ internalreturn orbit_call_internal(
 	info = ob->orbit_info;
 
 	/* 2. Create a orbit task struct and add to the orbit's task queue. */
-	new_task = orbit_create_task(flags, arg, npool, pools);
+	new_task = orbit_create_task(flags, arg, npool, pools, info->snap_slots);
 	if (new_task == NULL)
 		return -ENOMEM;
 

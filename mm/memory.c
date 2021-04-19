@@ -65,6 +65,7 @@
 #include <linux/gfp.h>
 #include <linux/migrate.h>
 #include <linux/string.h>
+#include <linux/atomic.h>
 #include <linux/dma-debug.h>
 #include <linux/debugfs.h>
 #include <linux/userfaultfd_k.h>
@@ -4851,22 +4852,60 @@ struct snap_entry {
 #define ARRSIZE 255
 
 struct snap_block {
-	struct list_head elem;
-	struct snap_entry array[ARRSIZE];
+	struct list_head	elem;
+	struct snap_slot	*slot;
+	struct snap_entry	array[ARRSIZE];
+};
+
+struct snap_slot {
+	atomic_t		in_use;
+	struct snap_block	*block;
 };
 
 struct vma_snapshot {
-	size_t count;
-	size_t head, tail;	/* Cursor in the first and last snap_block */
-	struct list_head list;
+	size_t			count;
+	/* Cursor in the first and last snap_block */
+	size_t			head, tail;
+	struct list_head	list;
+	struct snap_slot	*slots;	/* Same pointer as in orbit_info */
 };
 
-void snap_init(struct vma_snapshot *snap)
+struct snap_block *snap_block_alloc(struct vma_snapshot *snap)
+{
+	struct snap_slot *slot;
+	struct snap_block *block;
+
+	for (slot = snap->slots; slot < snap->slots + 16; ++slot) {
+		if (atomic_cmpxchg(&slot->in_use, 0, 1) == 1)
+			continue;
+
+		if (slot->block == NULL)
+			slot->block =
+				kmalloc(sizeof(struct snap_block), GFP_KERNEL);
+		slot->block->slot = slot;
+		return slot->block;
+	}
+
+	block = kmalloc(sizeof(struct snap_block), GFP_KERNEL);
+	block->slot = NULL;
+	return block;
+}
+
+void snap_block_free(struct snap_block *block)
+{
+	if (block->slot == NULL)
+		kfree(block);
+	else
+		atomic_set(&block->slot->in_use, 0);
+}
+
+void snap_init(struct vma_snapshot *snap, struct snap_slot *slots)
 {
 	snap->count = 0;
 	snap->head = 0;
 	snap->tail = 0;
 	INIT_LIST_HEAD(&snap->list);
+	snap->slots = slots;
 }
 
 void snap_destroy(struct vma_snapshot *snap)
@@ -4879,7 +4918,7 @@ void snap_destroy(struct vma_snapshot *snap)
 	while (!list_empty(&snap->list)) {
 		block = list_first_entry(&snap->list, struct snap_block, elem);
 		list_del(&block->elem);
-		kfree(block);
+		snap_block_free(block);
 	}
 }
 
@@ -4897,7 +4936,7 @@ void snap_push(struct vma_snapshot *snap, unsigned long addr, pte_t ptent)
 
 	++snap->count;
 	if (list_empty(&snap->list) || snap->tail == ARRSIZE) {
-		block = kmalloc(sizeof(struct snap_block), GFP_KERNEL);
+		block = snap_block_alloc(snap);
 		INIT_LIST_HEAD(&block->elem);
 		list_add_tail(&block->elem, &snap->list);
 		snap->tail = 0;
@@ -5088,7 +5127,7 @@ out_set_pte:
 	/* zap old dst pte mapping */
 	/* TODO: return value? */
 	/* TODO: optimize same pte for APPLY */
-	zap_pte_one_orbit(tlb, rss, dst_vma, dst_pmd, dst_pte, addr);
+	/* zap_pte_one_orbit(tlb, rss, dst_vma, dst_pmd, dst_pte, addr); */
 
 	set_pte_at(dst_mm, addr, dst_pte, pte);
 	return 0;
