@@ -15,6 +15,9 @@
 #include <linux/rmap.h>
 #include <linux/userfaultfd_k.h>
 
+#include <linux/timekeeping.h>
+#include <linux/timex.h>
+
 #define DBG 0
 
 #define printd if(DBG)printk
@@ -154,6 +157,26 @@ struct orbit_info *orbit_create_info(void __user **argptr)
 static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	unsigned long addr);
 
+enum { COUNTER_BASE = __COUNTER__ };
+
+#define CKPT 0
+
+#define ckpt(s) \
+	do { if(CKPT) { \
+		int cnt = __COUNTER__ - COUNTER_BASE - 1; \
+		if (cnt == 0) { \
+			ckpts[0] = (struct ckpt_t) { \
+				.clk = get_cycles(), \
+				.t = ktime_get_ns(), \
+				.name = s, \
+			}; \
+		} else { \
+			ckpts[cnt].clk += get_cycles() - ckpts[0].clk; \
+			ckpts[cnt].t += ktime_get_ns() - ckpts[0].t; \
+			ckpts[cnt].name = s; \
+		} \
+	} } while (0)
+
 /* FIXME: Currently we send a task to the orbit, and let the orbit child to
  * create a snapshot actively. When should the snapshot timepoint happen?
  * Should it be right after the orbit call? If so, we may need to wait for the
@@ -173,6 +196,19 @@ internalreturn orbit_call_internal(
 	unsigned long ret;
 	size_t i;
 
+	static u64 last_ns = 0;
+	if (CKPT && last_ns == 0)
+		last_ns = ktime_get_ns();
+
+	static int tcnt = 0;
+	static struct ckpt_t {
+		cycles_t clk;
+		u64 t;
+		const char *name;
+	} ckpts[32] = { { 0, 0, NULL, }, };
+
+	ckpt("init");
+
 	/* 1. Find the orbit context by obid, currently we only support one
 	 * orbit entity per process, thus we will ignore the obid. */
 	parent = current->group_leader;
@@ -184,6 +220,8 @@ internalreturn orbit_call_internal(
 	if (new_task == NULL)
 		return -ENOMEM;
 
+	ckpt("create_task");
+
 	printd("arg = %p, new_task->arg = %p\n", arg, new_task->arg);
 
 	/* Serialized marking protected parent mmap_sem.
@@ -193,6 +231,9 @@ internalreturn orbit_call_internal(
 		panic("orbit call cannot acquire parent sem");
 	}
 
+	ckpt("down_mmap_sem");
+
+#if 1
 	for (i = 0; i < npool; ++i) {
 		struct pool_snapshot *pool = new_task->pools + i;
 
@@ -212,6 +253,13 @@ internalreturn orbit_call_internal(
 				ORBIT_UPDATE_MARK, &pool->snapshot);
 		}
 	}
+#else
+	u64 t = ktime_get_ns();
+	while (ktime_get_ns() - t < 46000)
+		;
+#endif
+
+	ckpt("do_snap");
 
 	up_write(&parent->mm->mmap_sem);
 
@@ -227,6 +275,32 @@ internalreturn orbit_call_internal(
 		info->next_task = new_task;
 	mutex_unlock(&info->task_lock);
 	up(&info->sem);
+
+	ckpt("push_task");
+
+	if (CKPT) {
+		int total = __COUNTER__ - COUNTER_BASE - 1;
+		++tcnt;
+
+		if (tcnt % 10000 == 0) {
+
+		u64 new_time = ktime_get_ns();
+		printk("orbit_call 10000 times interval %lld ns\n", new_time - last_ns);
+		last_ns = new_time;
+
+		printk("orbit_call total %llu ns, %llu cycles\n",
+			ckpts[total - 1].t / tcnt, ckpts[total - 1].clk / tcnt);
+
+		ckpts[0].t = 0;
+		ckpts[0].clk = 0;
+		for (i = 1; i < total; ++i) {
+			printk("CKPT %20s takes: %10llu ns, %10llu cycles\n",
+				ckpts[i].name, (ckpts[i].t - ckpts[i - 1].t) / tcnt,
+				(ckpts[i].clk - ckpts[i - 1].clk) / tcnt);
+		}
+
+		}
+	}
 
 	/* 3. Return from main in async mode, */
 	if (flags & ORBIT_ASYNC)

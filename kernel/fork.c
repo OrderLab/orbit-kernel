@@ -97,6 +97,9 @@
 #include <linux/orbit.h>
 #include <linux/printk.h>
 
+#include <linux/timekeeping.h>
+#include <linux/timex.h>
+
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
 #include <linux/uaccess.h>
@@ -2587,6 +2590,19 @@ SYSCALL_DEFINE1(orbit_create, void __user **, orbit_argptr)
 	};
 
 	long ret = _do_fork(&args);
+
+	cycles_t clk1 = get_cycles();
+	cycles_t clk2 = get_cycles();
+	cycles_t clk3 = get_cycles();
+
+	printk("clk takes %ld %d cycles", clk2 - clk1, clk3 - clk1);
+
+	u64 t1 = ktime_get_ns();
+	u64 t2 = ktime_get_ns();
+	u64 t3 = ktime_get_ns();
+
+	printk("ktime takes %ld %d ns", t2 - t1, t3 - t1);
+
 	printk("in orbit_create, do fork returns %ld\n", ret);
 	return ret;
 }

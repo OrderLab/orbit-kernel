@@ -4929,6 +4929,7 @@ void snap_pop(struct vma_snapshot *snap)
 	}
 }
 
+#define CKPT 0
 
 static inline unsigned long
 update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
@@ -4953,8 +4954,27 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		goto out_set_pte;
 	}
 
+	static int tcnt = 0;
+	static struct ckpt_t {
+		cycles_t clk;
+		u64 t;
+		const char *name;
+	} ckpts[10] = {
+		{ 0, 0, "init", },
+		{ 0, 0, "misc", },
+		{ 0, 0, "wr_protect", },
+		{ 0, 0, "normalpage", },
+		{ 0, 0, "get_page", },
+		{ 0, 0, "dup_rmap", },
+		{ 0, 0, "misc2", },
+		{ 0, 0, "snappush", },
+	};
+
 	pte = *src_pte;
 	vm_flags = src_vma->vm_flags;
+
+	if (CKPT && mode == ORBIT_UPDATE_MARK)
+		ckpts[0].clk = get_cycles();
 
 	/* pte contains position in swap or file, so copy. */
 	if (unlikely(!pte_present(pte))) {
@@ -5054,6 +5074,9 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		}
 	}
 
+	if (CKPT && mode == ORBIT_UPDATE_MARK)
+		ckpts[1].clk += get_cycles() - ckpts[0].clk;
+
 	/*
 	 * If it's a COW mapping, write protect it both
 	 * in the parent and the child
@@ -5062,6 +5085,9 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		ptep_set_wrprotect(src_mm, addr, src_pte);
 		pte = pte_wrprotect(pte);
 	}
+
+	if (CKPT && mode == ORBIT_UPDATE_MARK)
+		ckpts[2].clk += get_cycles() - ckpts[0].clk;
 
 	/*
 	 * If it's a shared mapping, mark it clean in
@@ -5072,17 +5098,45 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	pte = pte_mkold(pte);
 
 	page = vm_normal_page(src_vma, addr, pte);
+	if (CKPT && mode == ORBIT_UPDATE_MARK)
+		ckpts[3].clk += get_cycles() - ckpts[0].clk;
 	if (page) {
 		get_page(page);
+		if (CKPT && mode == ORBIT_UPDATE_MARK)
+			ckpts[4].clk += get_cycles() - ckpts[0].clk;
 		page_dup_rmap(page, false);
+		if (CKPT && mode == ORBIT_UPDATE_MARK)
+			ckpts[5].clk += get_cycles() - ckpts[0].clk;
 		rss[mm_counter(page)]++;
 	} else if (pte_devmap(pte)) {
 		page = pte_page(pte);
 	}
 
+	if (CKPT && mode == ORBIT_UPDATE_MARK)
+		ckpts[6].clk += get_cycles() - ckpts[0].clk;
+
 out_set_pte:
 	if (mode == ORBIT_UPDATE_MARK) {
 		snap_push(snap, addr, pte);
+
+		if (CKPT) {
+			int i;
+			ckpts[7].clk += get_cycles() - ckpts[0].clk;
+
+			++tcnt;
+			if (tcnt % 3000000 == 0) {
+
+			ckpts[0].t = 0;
+			ckpts[0].clk = 0;
+			for (i = 1; i < 8; ++i) {
+				printk("CKPT %20s takes: %10llu ns, %10llu cycles\n",
+					ckpts[i].name, (ckpts[i].t - ckpts[i - 1].t) / tcnt,
+					(ckpts[i].clk - ckpts[i - 1].clk) / tcnt);
+			}
+
+			}
+		}
+
 		return 0;
 	}
 	/* zap old dst pte mapping */
@@ -5093,6 +5147,9 @@ out_set_pte:
 	set_pte_at(dst_mm, addr, dst_pte, pte);
 	return 0;
 }
+
+#undef CKPT
+#define CKPT 0
 
 static int update_pte_range(
 	struct mm_struct *dst_mm, struct mm_struct *src_mm,
@@ -5107,6 +5164,15 @@ static int update_pte_range(
 	int progress = 0;
 	int rss[NR_MM_COUNTERS];
 	swp_entry_t entry = (swp_entry_t){0};
+
+	static int tcnt = 0;
+	static int scnt = 0;
+	static struct ckpt_t {
+		cycles_t clk;
+		u64 t;
+		const char *name;
+	} ckpts[32] = { { 0, 0, NULL, }, };
+	bool doprint = false;
 
 	/* zap operations */
 	if (dst_mm)
@@ -5156,9 +5222,22 @@ again:
 			addr = end;
 			break;
 		}
+		cycles_t clk;
+		u64 t;
+		if (CKPT && mode == ORBIT_UPDATE_MARK) {
+			clk = get_cycles();
+			/* t = ktime_get_ns(); */
+		}
 		entry.val = update_one_pte(dst_mm, src_mm, dst_pmd,
 				dst_pte, src_pte, dst_vma, src_vma,
 				addr, rss, tlb, mode, snap);
+		if (CKPT && mode == ORBIT_UPDATE_MARK) {
+			ckpts[0].clk += get_cycles() - clk;
+			/* ckpts[0].t += ktime_get_ns() - t; */
+			++tcnt;
+			if (tcnt % 3000000 == 0)
+				doprint = true;
+		}
 		if (entry.val)
 			break;
 		progress += 8;
@@ -5180,7 +5259,22 @@ again:
 
 	if (orig_dst_pte)
 		pte_unmap_unlock(orig_dst_pte, dst_ptl);
+	cycles_t clk;
+	if (CKPT && mode == ORBIT_UPDATE_MARK)
+		clk = get_cycles();
+	/* u64 t = ktime_get_ns(); */
 	cond_resched();
+	if (CKPT && ORBIT_UPDATE_MARK) {
+		++scnt;
+		ckpts[1].clk += get_cycles() - clk;
+	}
+
+	if (CKPT && mode == ORBIT_UPDATE_MARK && doprint) {
+		printk("CKPT %20s takes: %10llu ns, %10llu cycles\n",
+			"update_one", ckpts[0].t / tcnt, ckpts[0].clk / tcnt);
+		printk("CKPT %20s takes: %10llu ns, %10llu cycles\n",
+			"cond_resched", ckpts[1].t / scnt, ckpts[1].clk / scnt);
+	}
 
 	if (entry.val) {
 		if (add_swap_count_continuation(entry, GFP_KERNEL) < 0)
@@ -5193,6 +5287,9 @@ again:
 	}
 	return 0;
 }
+
+#undef CKPT
+#define CKPT 0
 
 /* Reduced zap function that was integrated into update_pte_range() */
 #if 0
@@ -5252,10 +5349,18 @@ static inline int update_pmd_range(
 	pud_t *dst_pud, pud_t *src_pud,
 	struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	unsigned long addr, unsigned long end, struct mmu_gather *tlb,
-	enum update_mode mode, struct vma_snapshot *snap)
+	enum update_mode mode, struct vma_snapshot *snap, int *pmdcnt)
 {
 	pmd_t *src_pmd, *dst_pmd;
 	unsigned long next;
+
+	static int tcnt = 0;
+	static struct ckpt_t {
+		cycles_t clk;
+		u64 t;
+		const char *name;
+	} ckpts[1] = { { 0, 0, NULL, }, };
+	bool doprint = false;
 
 	dst_pmd = dst_mm ? pmd_alloc(dst_mm, dst_pud, addr) : NULL;
 	if (dst_mm && !dst_pmd)
@@ -5283,11 +5388,32 @@ static inline int update_pmd_range(
 		/* Check snap and skip */
 		if (mode == ORBIT_UPDATE_APPLY && snap_empty(snap))
 			break;
+
+		cycles_t clk;
+		u64 t;
+		if (CKPT && mode == ORBIT_UPDATE_MARK) {
+			clk = get_cycles();
+			/* t = ktime_get_ns(); */
+		}
 		if (update_pte_range(dst_mm, src_mm, dst_pmd, src_pmd,
 			dst_vma, src_vma, addr, next, tlb, mode, snap))
 			return -ENOMEM;
+		if (CKPT && mode == ORBIT_UPDATE_MARK) {
+			ckpts[0].clk += get_cycles() - clk;
+			/* ckpts[0].t += ktime_get_ns() - t; */
+			++*pmdcnt;
+			++tcnt;
+			if (tcnt % 20000 == 0)
+				doprint = true;
+		}	
 	} while ((dst_pmd ? dst_pmd++ : NULL), (src_pmd ? src_pmd++ : NULL),
 		addr = next, addr != end);
+
+	if (CKPT && mode == ORBIT_UPDATE_MARK && doprint) {
+		printk("CKPT %20s takes: %10llu ns, %10llu cycles\n",
+			"update_pte_range", ckpts[0].t / tcnt, ckpts[0].clk / tcnt);
+	}
+
 	return 0;
 }
 
@@ -5296,7 +5422,7 @@ static inline int update_pud_range(
 	p4d_t *dst_p4d, p4d_t *src_p4d,
 	struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	unsigned long addr, unsigned long end, struct mmu_gather *tlb,
-	enum update_mode mode, struct vma_snapshot *snap)
+	enum update_mode mode, struct vma_snapshot *snap, int *pmdcnt)
 {
 	pud_t *src_pud, *dst_pud;
 	unsigned long next;
@@ -5328,7 +5454,7 @@ static inline int update_pud_range(
 		if (mode == ORBIT_UPDATE_APPLY && snap_empty(snap))
 			break;
 		if (update_pmd_range(dst_mm, src_mm, dst_pud, src_pud,
-			dst_vma, src_vma, addr, next, tlb, mode, snap))
+			dst_vma, src_vma, addr, next, tlb, mode, snap, pmdcnt))
 			return -ENOMEM;
 	} while ((dst_pud ? dst_pud++ : NULL), (src_pud ? src_pud++ : NULL),
 		addr = next, addr != end);
@@ -5340,7 +5466,7 @@ static inline int update_p4d_range(
 	pgd_t *dst_pgd, pgd_t *src_pgd,
 	struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	unsigned long addr, unsigned long end, struct mmu_gather *tlb,
-	enum update_mode mode, struct vma_snapshot *snap)
+	enum update_mode mode, struct vma_snapshot *snap, int *pmdcnt)
 {
 	p4d_t *src_p4d, *dst_p4d;
 	unsigned long next;
@@ -5357,12 +5483,30 @@ static inline int update_p4d_range(
 		if (mode == ORBIT_UPDATE_APPLY && snap_empty(snap))
 			break;
 		if (update_pud_range(dst_mm, src_mm, dst_p4d, src_p4d,
-			dst_vma, src_vma, addr, next, tlb, mode, snap))
+			dst_vma, src_vma, addr, next, tlb, mode, snap, pmdcnt))
 			return -ENOMEM;
 	} while ((dst_p4d ? dst_p4d++ : NULL), (src_p4d ? src_p4d++ : NULL),
 		addr = next, addr != end);
 	return 0;
 }
+
+enum { COUNTER_BASE = __COUNTER__ };
+
+#define ckpt(s) \
+	do { if(CKPT && mode == ORBIT_UPDATE_MARK) { \
+		int cnt = __COUNTER__ - COUNTER_BASE - 1; \
+		if (cnt == 0) { \
+			ckpts[0] = (struct ckpt_t) { \
+				.clk = get_cycles(), \
+				.t = ktime_get_ns(), \
+				.name = s, \
+			}; \
+		} else { \
+			ckpts[cnt].clk += get_cycles() - ckpts[0].clk; \
+			ckpts[cnt].t += ktime_get_ns() - ckpts[0].t; \
+			ckpts[cnt].name = s; \
+		} \
+	} } while (0)
 
 int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
@@ -5378,13 +5522,27 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	/* Variables to free up dst entries */
 	struct mmu_gather tlb;
 
+	static int tcnt = 0;
+	static struct ckpt_t {
+		cycles_t clk;
+		u64 t;
+		const char *name;
+	} ckpts[32] = { { 0, 0, NULL, }, };
+	static int pmdcnt = 0;
+
+	static int pagecnt = 0;
+	unsigned long origaddr = addr;
+
 	/* TODO: check pointers validity */
 	if (mode == ORBIT_UPDATE_APPLY)
 		src_mm = NULL, src_vma = NULL;
 	else if (mode == ORBIT_UPDATE_MARK)
 		dst_mm = NULL, dst_vma = NULL;
 
+	ckpt("init");
+
 	lru_add_drain();
+	ckpt("lru_add_drain");
 	if (dst_mm != NULL) {
 		tlb_gather_mmu(&tlb, dst_mm, addr, end);
 		update_hiwater_rss(dst_mm);
@@ -5428,6 +5586,8 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		mmu_notifier_invalidate_range_start(&range);
 	}
 
+	ckpt("misc1");
+
 	ret = 0;
 	dst_pgd = dst_mm ? pgd_offset(dst_mm, addr) : NULL;
 	src_pgd = src_mm ? pgd_offset(src_mm, addr) : NULL;
@@ -5440,23 +5600,54 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 			break;
 		if (unlikely(update_p4d_range(dst_mm, src_mm,
 			dst_pgd, src_pgd, dst_vma, src_vma,
-			addr, next, &tlb, mode, snap))) {
+			addr, next, &tlb, mode, snap, &pmdcnt))) {
 			ret = -ENOMEM;
 			break;
 		}
 	} while ((dst_pgd ? dst_pgd++ : NULL), (src_pgd ? src_pgd++ : NULL),
 		addr = next, addr != end);
 
+	ckpt("update_p4d_range");
+
 	if (is_cow)
 		mmu_notifier_invalidate_range_end(&range);
+
+	ckpt("mmu_notify");
 
 	if (dst_mm != NULL) {
 		flush_tlb_range(dst_vma, addr, end);
 		tlb_finish_mmu(&tlb, addr, end);
 	}
+	ckpt("dst_flush");
 
 	if (src_mm != NULL)
 		flush_tlb_range(src_vma, addr, end);
+	ckpt("src_flush");
+
+
+	if (CKPT && mode == ORBIT_UPDATE_MARK) {
+		int i;
+		int total = __COUNTER__ - COUNTER_BASE - 1;
+		++tcnt;
+		pagecnt += (end - origaddr) / 4096;
+
+		if (tcnt % 10000 == 0) {
+
+		printk("update_page_range total %llu ns, %llu cycles\n",
+			ckpts[total - 1].t / tcnt, ckpts[total - 1].clk / tcnt);
+		printk("pmdcnt = %d, tcnt = %d, pmdcnt / tcnt = %d, pgcnt = %d, snapcnt %d\n",
+			pmdcnt, tcnt, pmdcnt/ tcnt, pagecnt / tcnt, snap->count);
+
+		ckpts[0].t = 0;
+		ckpts[0].clk = 0;
+		for (i = 1; i < total; ++i) {
+			printk("CKPT %20s takes: %10llu ns, %10llu cycles\n",
+				ckpts[i].name, (ckpts[i].t - ckpts[i - 1].t) / tcnt,
+				(ckpts[i].clk - ckpts[i - 1].clk) / tcnt);
+		}
+
+		}
+	}
 
 	return ret;
 }
