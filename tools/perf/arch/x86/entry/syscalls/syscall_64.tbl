@@ -358,6 +358,16 @@
 434	common	pidfd_open		__x64_sys_pidfd_open
 435	common	clone3			__x64_sys_clone3/ptregs
 
+# orbit syscalls
+436	common	orbit_create		__x64_sys_orbit_create
+437	common	orbit_call		__x64_sys_orbit_call
+438	common	orbit_return		__x64_sys_orbit_return
+439	common	orbit_send		__x64_sys_orbit_send
+440	common	orbit_recv		__x64_sys_orbit_recv
+441	common	orbit_commit		__x64_sys_orbit_commit
+442	common	orbit_sendv		__x64_sys_orbit_sendv
+443	common	orbit_recvv		__x64_sys_orbit_recvv
+
 #
 # x32-specific system call numbers start at 512 to avoid cache impact
 # for native 64-bit operation. The __x32_compat_sys stubs are created
