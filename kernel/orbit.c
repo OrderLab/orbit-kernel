@@ -146,9 +146,48 @@ static struct orbit_task *orbit_create_task(
 	return new_task;
 }
 
+static void timing_reference(void)
+{
+	cycles_t clk1, clk2, clk3;
+	u64 t1, t2, t3;
+	int i;
+	DEFINE_SPINLOCK(lock);
+
+	printk("unsynchronized_tsc = %d\n", unsynchronized_tsc());
+
+	clk1 = get_cycles();
+	clk2 = get_cycles();
+	clk3 = get_cycles();
+
+	printk("clk takes %lld %lld cycles", clk2 - clk1, clk3 - clk1);
+
+	t1 = ktime_get_ns();
+	t2 = ktime_get_ns();
+	t3 = ktime_get_ns();
+
+	printk("ktime takes %lld %lld ns", t2 - t1, t3 - t1);
+
+	clk2 = clk3 = 0;
+
+	for (i = 0; i < 10; ++i) {
+		clk1 = get_cycles();
+		spin_lock(&lock);
+		clk2 += get_cycles() - clk1;
+
+		clk1 = get_cycles();
+		spin_unlock(&lock);
+		clk3 += get_cycles() - clk1;
+	}
+
+	printk("avg cycles for spin lock: %lld\n", clk2 / 10);
+	printk("avg cycles for spin unlock: %lld\n", clk3 / 10);
+}
+
 struct orbit_info *orbit_create_info(void __user **argptr)
 {
 	struct orbit_info *info;
+
+	timing_reference();
 
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
 	if (info == NULL)
@@ -280,9 +319,9 @@ internalreturn orbit_call_internal(
 		}
 	}
 #else
-	u64 t = ktime_get_ns();
-	while (ktime_get_ns() - t < 46000)
-		;
+	/* u64 t = ktime_get_ns();
+	while (ktime_get_ns() - t < 26000)
+		; */
 #endif
 
 	ckpt("do_snap");
@@ -309,10 +348,10 @@ internalreturn orbit_call_internal(
 		int total = __COUNTER__ - COUNTER_BASE - 1;
 		++tcnt;
 
-		if (tcnt % 10000 == 0) {
+		if (tcnt % 100000 == 0) {
 
 		u64 new_time = ktime_get_ns();
-		printk("orbit_call 10000 times interval %lld ns\n", new_time - last_ns);
+		printk("orbit_call 100000 times interval %lld ns\n", new_time - last_ns);
 		last_ns = new_time;
 
 		printk("orbit_call total %llu ns, %llu cycles\n",
@@ -579,6 +618,19 @@ internalreturn orbit_return_internal(unsigned long retval)
 	info->current_task = task = info->next_task;
 	info->next_task = list_is_last(&task->elem, &info->task_list) ?
 					NULL : list_next_entry(task, elem);
+
+#if 0
+	static int max_qdepth = 0;
+	int qdepth = info->taskid_counter - task->taskid;
+	if (qdepth > 100) {
+		printk("warning: orbit list size %d\n", qdepth);
+	}
+	if (qdepth > max_qdepth) {
+		max_qdepth = qdepth;
+		printk("new max qdepth %d\n", max_qdepth);
+	}
+#endif
+
 	mutex_unlock(&info->task_lock);
 	printd("orbit return unlocked 2\n");
 
