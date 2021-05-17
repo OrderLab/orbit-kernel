@@ -4892,7 +4892,8 @@ void snap_push(struct vma_snapshot *snap, unsigned long addr, pte_t ptent)
 {
 	struct snap_block *block;
 
-	if (!(pte_present(ptent) && !pte_write(ptent)))
+	/* if (!(pte_present(ptent) && !pte_write(ptent))) */
+	if (pte_write(ptent))
 		panic("marked pte should be present & RO %016lx %016lx", addr, pte_val(ptent));
 
 	++snap->count;
@@ -4942,6 +4943,7 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	unsigned long vm_flags;
 	pte_t pte;
 	struct page *page;
+	bool should_panic = false;
 
 	if (mode == ORBIT_UPDATE_APPLY) {
 		struct snap_entry *s = snap_front(snap);
@@ -4991,12 +4993,14 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 				return 0;
 			panic("Orbit update has page in swap or file.");
 		} else if (mode == ORBIT_UPDATE_MARK) {
-			panic("Orbit mark with src in swap not supported: %016lx.", pte_val(pte));
+			should_panic = true;
+			printk("Orbit mark with src in swap not supported: %016lx %016lx.", pte_val(pte), addr);
 		}
 
 		swp_entry_t entry = pte_to_swp_entry(pte);
 
 		if (likely(!non_swap_entry(entry))) {
+			if (should_panic) panic("Is a swap entry %016lx", entry.val);
 			if (swap_duplicate(entry) < 0)
 				return entry.val;
 
@@ -5010,6 +5014,7 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 			}
 			rss[MM_SWAPENTS]++;
 		} else if (is_migration_entry(entry)) {
+			if (should_panic) panic("Is a migration entry %016lx", entry.val);
 			page = migration_entry_to_page(entry);
 
 			rss[mm_counter(page)]++;
@@ -5027,6 +5032,7 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 				set_pte_at(src_mm, addr, src_pte, pte);
 			}
 		} else if (is_device_private_entry(entry)) {
+			if (should_panic) panic("Is a dev private entry %016lx", entry.val);
 			page = device_private_entry_to_page(entry);
 
 			/*
@@ -5056,6 +5062,7 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 				set_pte_at(src_mm, addr, src_pte, pte);
 			}
 		}
+		if (should_panic) panic("fall out");
 		goto out_set_pte;
 	} else {	/* src present */	
 		if (mode == ORBIT_UPDATE_DIRTY) {
