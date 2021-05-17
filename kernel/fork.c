@@ -1778,6 +1778,19 @@ static void copy_oom_score_adj(u64 clone_flags, struct task_struct *tsk)
 	mutex_unlock(&oom_adj_mutex);
 }
 
+#define CKPT 0
+
+#if CKPT
+#define ckpt(s)	\
+	do { if(orbit) { ckpts[tcnt++] = (struct ckpt_t) {	\
+		.clk = get_cycles(),	\
+		.t = ktime_get_ns(),	\
+		.name = s,	\
+	}; } } while (0)
+#else
+#define ckpt(s) do {} while (0)
+#endif
+
 /*
  * This creates a new process as a copy of the old one,
  * but does not actually start it yet.
@@ -1797,6 +1810,19 @@ static __latent_entropy struct task_struct *copy_process(
 	struct multiprocess_signals delayed;
 	struct file *pidfile = NULL;
 	u64 clone_flags = args->flags;
+
+#if CKPT
+	/* int orbit = !!(clone_flags & (CLONE_ORBIT | 0x000200000000ULL)); */
+	int orbit = 1;
+	int tcnt = 0;
+	struct ckpt_t {
+		cycles_t clk;
+		u64 t;
+		const char *name;
+	} ckpts[32];
+
+	ckpt("init");
+#endif
 
 	/*
 	 * Don't allow sharing the root directory with processes in a different
@@ -1873,9 +1899,11 @@ static __latent_entropy struct task_struct *copy_process(
 		goto fork_out;
 
 	retval = -ENOMEM;
+	ckpt("init");
 	p = dup_task_struct(current, node);
 	if (!p)
 		goto fork_out;
+	ckpt("dup_task_struct");
 
 	/*
 	 * This _must_ happen before we call free_task(), i.e. before we jump
@@ -2027,31 +2055,40 @@ static __latent_entropy struct task_struct *copy_process(
 	retval = copy_semundo(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_security;
+	ckpt("misc1");
 	retval = copy_files(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_semundo;
+	ckpt("copy_files");
 	retval = copy_fs(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_files;
+	ckpt("copy_fs");
 	retval = copy_sighand(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_fs;
+	ckpt("copy_sighand");
 	retval = copy_signal(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_sighand;
+	ckpt("copy_signal");
 	retval = copy_mm(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_signal;
+	ckpt("copy_mm");
 	retval = copy_namespaces(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_mm;
+	ckpt("copy_namespaces");
 	retval = copy_io(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_namespaces;
+	ckpt("copy_io");
 	retval = copy_thread_tls(clone_flags, args->stack, args->stack_size, p,
 				 args->tls);
 	if (retval)
 		goto bad_fork_cleanup_io;
+	ckpt("copy_thread_tls");
 
 	stackleak_task_init(p);
 
@@ -2088,6 +2125,7 @@ static __latent_entropy struct task_struct *copy_process(
 		if (retval)
 			goto bad_fork_put_pidfd;
 	}
+	ckpt("pidfd");
 
 	/* FIXME: dealloc orbit_info in process exit to prevent memory leak. */
 	/*
@@ -2115,6 +2153,7 @@ static __latent_entropy struct task_struct *copy_process(
 		 * creation order. */
 		p->orbit_child = NULL;
 	}
+	ckpt("orbit");
 
 #ifdef CONFIG_BLOCK
 	p->plug = NULL;
@@ -2284,6 +2323,21 @@ static __latent_entropy struct task_struct *copy_process(
 
 	copy_oom_score_adj(clone_flags, p);
 
+	ckpt("rest");
+
+#if CKPT
+	if (orbit) {
+		int i;
+		printk("copy_process total %llu ns, %llu cycles\n",
+			ckpts[tcnt - 1].t - ckpts[0].t, ckpts[tcnt - 1].clk - ckpts[0].clk);
+		for (i = 1; i < tcnt; ++i) {
+			printk("CKPT %20s takes: %10llu ns, %10llu cycles\n",
+				ckpts[i].name, ckpts[i].t - ckpts[i-1].t,
+				ckpts[i].clk - ckpts[i-1].clk);
+		}
+	}
+#endif
+
 	return p;
 
 bad_fork_cancel_cgroup:
@@ -2369,7 +2423,12 @@ struct task_struct *fork_idle(int cpu)
 		.flags = CLONE_VM,
 	};
 
+
+	u64 t1 = ktime_get_ns();
 	task = copy_process(&init_struct_pid, 0, cpu_to_node(cpu), &args);
+	u64 t2 = ktime_get_ns();
+	printk("idle creation takes %llu ns\n", t2 - t1);
+
 	if (!IS_ERR(task)) {
 		init_idle_pids(task);
 		init_idle(task, cpu);
@@ -2418,7 +2477,10 @@ long _do_fork(struct kernel_clone_args *args)
 			trace = 0;
 	}
 
+	/* u64 t1 = ktime_get_ns(); */
 	p = copy_process(NULL, trace, NUMA_NO_NODE, args);
+	/* u64 t2 = ktime_get_ns();
+	printk("copy_process takes %llu\n", t2 - t1); */
 	add_latent_entropy();
 
 	if (IS_ERR(p))
@@ -2499,14 +2561,25 @@ long do_fork(unsigned long clone_flags,
 pid_t kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
 {
 	struct kernel_clone_args args = {
-		.flags		= ((lower_32_bits(flags) | CLONE_VM |
+		.flags		= ((lower_32_bits(flags) /*| 0x000200000000ULL*/ | CLONE_VM |
 				    CLONE_UNTRACED) & ~CSIGNAL),
 		.exit_signal	= (lower_32_bits(flags) & CSIGNAL),
 		.stack		= (unsigned long)fn,
 		.stack_size	= (unsigned long)arg,
 	};
 
-	return _do_fork(&args);
+#if 0
+	u64 t1 = ktime_get_ns();
+	cycles_t c1 = get_cycles();
+#endif
+	long ret = _do_fork(&args);
+#if 0
+	u64 t2 = ktime_get_ns();
+	cycles_t c2 = get_cycles();
+	printk("kernel_thread creation takes %llu ns, %llu cycles\n", t2 - t1, c2 - c1);
+#endif
+
+	return ret;
 }
 
 #ifdef __ARCH_WANT_SYS_FORK
@@ -2593,9 +2666,11 @@ SYSCALL_DEFINE1(orbit_create, void __user **, orbit_argptr)
 		.orbit_argptr	= orbit_argptr,
 	};
 
+	u64 t1 = ktime_get_ns();
 	long ret = _do_fork(&args);
+	u64 t2 = ktime_get_ns();
 
-	printk("in orbit_create, do fork returns %ld\n", ret);
+	printk("in orbit_create, do fork returns %ld, time %llu ns\n", ret, t2 - t1);
 	return ret;
 }
 

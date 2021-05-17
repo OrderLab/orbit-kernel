@@ -153,6 +153,8 @@ static void timing_reference(void)
 	int i;
 	DEFINE_SPINLOCK(lock);
 
+	printk("size of task = %lu\n", sizeof(struct task_struct));
+
 	printk("unsynchronized_tsc = %d\n", unsynchronized_tsc());
 
 	clk1 = get_cycles();
