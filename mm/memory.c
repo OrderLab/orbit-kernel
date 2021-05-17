@@ -2404,6 +2404,46 @@ static inline void ptl_cnt_dec(struct mm_struct *mm)
 #endif
 }
 
+#define CKPT_TICK(address) \
+	static atomic64_t cnt = ATOMIC64_INIT(0); \
+	static atomic64_t total_cycles = ATOMIC64_INIT(0); \
+	static atomic64_t total_ns = ATOMIC64_INIT(0); \
+	cycles_t c1, c2; \
+	u64 t1, t2; \
+	if (0x800000000UL <= (address) && (address) < 0x840000000UL) { \
+		c1 = get_cycles(); \
+		t1 = ktime_get_ns(); \
+	}
+
+#define CKPT_TOCK(address, name) \
+	if (0x800000000UL <= (address) && (address) < 0x840000000UL) { \
+		u64 tcnt, tcycles, tns; \
+		c2 = get_cycles(); \
+		t2 = ktime_get_ns(); \
+		tcnt = atomic64_inc_return(&cnt); \
+		tcycles = atomic64_add_return(c2 - c1, &total_cycles); \
+		tns = atomic64_add_return(t2 - t1, &total_ns); \
+		if (tcnt % 100000 == 0) { \
+			printk(name " %lld avg %lld %lld\n", tcnt, \
+				tcycles / tcnt, tns / tcnt); \
+		} \
+	}
+
+#define CKPT 0
+
+#if CKPT
+enum { WP_COUNTER_BASE = __COUNTER__ };
+#define ckpt(s) \
+	do { if(correct_address) { \
+		const int cnt = __COUNTER__ - WP_COUNTER_BASE - 1; \
+		atomic64_add(get_cycles() - ckpt0.clk, &ckpts[cnt].clk); \
+		atomic64_add(ktime_get_ns() - ckpt0.t, &ckpts[cnt].t); \
+		atomic64_inc(&ckpts[cnt].cnt); \
+	} } while (0)
+#else
+#define ckpt(s) do {} while(0)
+#endif
+
 /*
  * Handle the case of a page which we actually need to copy to a new page.
  *
@@ -2431,6 +2471,45 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	struct mem_cgroup *memcg;
 	struct mmu_notifier_range range;
 
+#if CKPT
+	int cowret = 1;
+	const bool correct_address = 
+		0x800000000UL <= vmf->address && vmf->address < 0x840000000UL;
+
+	/* static u64 last_ns = 0;
+	if (CKPT && last_ns == 0)
+		last_ns = ktime_get_ns(); */
+
+#define A ATOMIC64_INIT(0)
+	static atomic64_t cancel_cnt = A;
+	static atomic64_t tcnt = A;
+	static struct ckpt_t {
+		atomic64_t clk;
+		atomic64_t t;
+		atomic64_t cnt;
+		const char *name;
+	} ckpts[10] = {
+		{ A, A, A, "cow", },
+		{ A, A, A, "before_ptl", },
+		{ A, A, A, "after_ptl", },
+		{ A, A, A, "slice0", },
+		{ A, A, A, "ptep_cl_flush_noti", },
+		{ A, A, A, "slice2", },
+		{ A, A, A, "slice3", },
+		{ A, A, A, "set_pte", },
+		{ A, A, A, "misc", },
+	};
+#undef A
+	struct ckpt_non_atomic_t {
+		cycles_t clk;
+		u64 t;
+	} ckpt0;
+	if (correct_address) {
+		ckpt0.clk = get_cycles();
+		ckpt0.t = ktime_get_ns();
+	}
+#endif
+
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
 
@@ -2455,9 +2534,19 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 			put_page(new_page);
 			if (old_page)
 				put_page(old_page);
+		#if CKPT
+			cowret = 0;
+		#else
 			return 0;
+		#endif
 		}
 	}
+
+#if CKPT
+	ckpt("cow");
+	if (cowret == 0)
+		return 0;
+#endif
 
 	if (mem_cgroup_try_charge_delay(new_page, mm, GFP_KERNEL, &memcg, false))
 		goto oom_free_new;
@@ -2473,7 +2562,19 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	 * Re-check the pte - we dropped the lock
 	 */
 	ptl_cnt_inc(mm);
+#if CKPT
+	vmf->pte = ({
+		spinlock_t *__ptl = pte_lockptr(mm, vmf->pmd);
+		pte_t *__pte = pte_offset_map(vmf->pmd, vmf->address);
+		vmf->ptl = __ptl;
+		ckpt("before_ptl");
+		spin_lock(__ptl);
+		ckpt("after_ptl");
+		__pte;
+	});
+#else
 	vmf->pte = pte_offset_map_lock(mm, vmf->pmd, vmf->address, &vmf->ptl);
+#endif
 	if (likely(pte_same(*vmf->pte, vmf->orig_pte))) {
 		if (old_page) {
 			if (!PageAnon(old_page)) {
@@ -2493,10 +2594,13 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 		 * seen in the presence of one thread doing SMC and another
 		 * thread doing COW.
 		 */
+		ckpt("slice0");
 		ptep_clear_flush_notify(vma, vmf->address, vmf->pte);
+		ckpt("ptep_cl_flush_noti");
 		page_add_new_anon_rmap(new_page, vma, vmf->address, false);
 		mem_cgroup_commit_charge(new_page, memcg, false, false);
 		lru_cache_add_active_or_unevictable(new_page, vma);
+		ckpt("slice2");
 		/*
 		 * We call the notify macro here because, when using secondary
 		 * mmu page tables (such as kvm shadow page tables), we want the
@@ -2529,13 +2633,18 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 			 */
 			page_remove_rmap(old_page, false);
 		}
+		ckpt("slice3");
 
 		/* Free the old page.. */
 		new_page = old_page;
 		page_copied = 1;
 	} else {
 		mem_cgroup_cancel_charge(new_page, memcg, false);
+#if CKPT
+		atomic64_inc(&cancel_cnt);
+#endif
 	}
+	ckpt("set_pte");
 
 	if (new_page)
 		put_page(new_page);
@@ -2560,6 +2669,45 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 		}
 		put_page(old_page);
 	}
+
+	ckpt("misc");
+
+#if CKPT
+	if (correct_address) {
+	const int total = __COUNTER__ - WP_COUNTER_BASE - 1;
+	int ttcnt = atomic64_inc_return(&tcnt);
+	int i;
+
+	if (ttcnt % 100000 == 0) {
+
+	/* u64 new_time = ktime_get_ns();
+	printk("orbit_call 10000 times interval %lld ns\n", new_time - last_ns);
+	last_ns = new_time; */
+
+#define ar(x) atomic64_read(&(x))
+	printk("cancel cnt %lld", ar(cancel_cnt));
+	printk("wp_page_copy total %llu ns, %llu cycles\n",
+		ar(ckpts[total - 1].t) / ar(ckpts[total - 1].cnt),
+		ar(ckpts[total - 1].clk) / ar(ckpts[total - 1].cnt));
+
+	printk("CKPT %20s takes: %10llu ns, %10llu cycles, %10llu times\n",
+		ckpts[0].name, ar(ckpts[0].t) / ar(ckpts[0].cnt),
+		ar(ckpts[0].clk) / ar(ckpts[0].cnt), ar(ckpts[0].cnt));
+	for (i = 1; i < total; ++i) {
+		printk("CKPT %20s takes: %10llu ns, %10llu cycles, %10llu times\n",
+			ckpts[i].name,
+			ar(ckpts[i].t) / ar(ckpts[i].cnt)
+				- ar(ckpts[i - 1].t) / ar(ckpts[i - 1].cnt),
+			ar(ckpts[i].clk) / ar(ckpts[i].cnt)
+				- ar(ckpts[i - 1].clk) / ar(ckpts[i - 1].cnt),
+			ar(ckpts[i].cnt));
+	}
+
+	}
+	}
+#undef ar
+#endif
+
 	return page_copied ? VM_FAULT_WRITE : 0;
 oom_free_new:
 	put_page(new_page);
@@ -2568,6 +2716,8 @@ oom:
 		put_page(old_page);
 	return VM_FAULT_OOM;
 }
+#undef ckpt
+#undef CKPT
 
 /**
  * finish_mkwrite_fault - finish page fault for a shared mapping, making PTE
@@ -2695,8 +2845,13 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 				     (VM_WRITE|VM_SHARED))
 			return wp_pfn_shared(vmf);
 
+#define CKPT 0
+#if CKPT
+		goto unlock_copy;
+#else
 		pte_unmap_unlock(vmf->pte, vmf->ptl);
 		return wp_page_copy(vmf);
+#endif
 	}
 
 	/*
@@ -2762,8 +2917,18 @@ copy:
 	get_page(vmf->page);
 
 	ptl_cnt_dec(vmf->vma->vm_mm);
+#if CKPT
+unlock_copy:
+	pte_unmap_unlock(vmf->pte, vmf->ptl);
+	CKPT_TICK(vmf->address);
+	vm_fault_t ret = wp_page_copy(vmf);
+	CKPT_TOCK(vmf->address, "wp_page_copy");
+	return ret;
+#else
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 	return wp_page_copy(vmf);
+#endif
+#undef CKPT
 }
 
 static void unmap_mapping_range_vma(struct vm_area_struct *vma,
@@ -4004,8 +4169,19 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 	if (unlikely(!pte_same(*vmf->pte, entry)))
 		goto unlock;
 	if (vmf->flags & FAULT_FLAG_WRITE) {
-		if (!pte_write(entry))
+		if (!pte_write(entry)) {
+#define CKPT 0
+#if CKPT
+			int ret;
+			CKPT_TICK(vmf->address);
+			ret = do_wp_page(vmf);
+			CKPT_TOCK(vmf->address, "do_wp_page");
+			return ret;
+#else
 			return do_wp_page(vmf);
+#endif
+#undef CKPT
+		}
 		entry = pte_mkdirty(entry);
 	}
 	entry = pte_mkyoung(entry);
@@ -4114,7 +4290,16 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
 		}
 	}
 
+#define CKPT 0
+#if CKPT
+	CKPT_TICK(address);
+	ret = handle_pte_fault(&vmf);
+	CKPT_TOCK(address, "fault_pte");
+	return ret;
+#else
 	return handle_pte_fault(&vmf);
+#endif
+#undef CKPT
 }
 
 /*
@@ -4127,6 +4312,11 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 		unsigned int flags)
 {
 	vm_fault_t ret;
+
+#define CKPT 0
+#if CKPT
+	CKPT_TICK(address);
+#endif
 
 	__set_current_state(TASK_RUNNING);
 
@@ -4164,6 +4354,11 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 		if (task_in_memcg_oom(current) && !(ret & VM_FAULT_OOM))
 			mem_cgroup_oom_synchronize(false);
 	}
+
+#if CKPT
+	CKPT_TOCK(address, "fault");
+#endif
+#undef CKPT
 
 	return ret;
 }
