@@ -426,6 +426,10 @@ struct mm_struct {
 		spinlock_t page_table_lock; /* Protects page tables and some
 					     * counters
 					     */
+		atomic_t lock_waiters;
+		int max_lock_waiters;
+		int total_lock_waiters;
+		int stat_cnt;
 		struct rw_semaphore mmap_sem;
 
 		struct list_head mmlist; /* List of maybe swapped mm's.	These

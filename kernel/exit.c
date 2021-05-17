@@ -795,6 +795,14 @@ void __noreturn do_exit(long code)
 	tsk->exit_code = code;
 	taskstats_exit(tsk, group_dead);
 
+	static bool output = true;
+	if (output && current->group_leader->orbit_child) {
+		output = false;
+		printk("orbit task last plt waiters %d\n", atomic_read(&current->mm->lock_waiters));
+		printk("orbit task ptl max waiter %d\n", current->mm->max_lock_waiters);
+		printk("orbit task ptl avg waiter %d / %d\n",
+			current->mm->total_lock_waiters, current->mm->stat_cnt);
+	}
 	exit_mm();
 
 	if (group_dead)

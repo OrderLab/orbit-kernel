@@ -2383,6 +2383,27 @@ static inline void wp_page_reuse(struct vm_fault *vmf)
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 }
 
+#define PTLCNT 0
+
+static inline void ptl_cnt_inc(struct mm_struct *mm)
+{
+#if PTLCNT
+	atomic_inc(&mm->lock_waiters);
+#endif
+}
+
+static inline void ptl_cnt_dec(struct mm_struct *mm)
+{
+#if PTLCNT
+	int waiters = atomic_read(&mm->lock_waiters);
+	atomic_dec(&mm->lock_waiters);
+	if (mm->max_lock_waiters < waiters)
+		mm->max_lock_waiters = waiters;
+	mm->total_lock_waiters += waiters;
+	++mm->stat_cnt;
+#endif
+}
+
 /*
  * Handle the case of a page which we actually need to copy to a new page.
  *
@@ -2451,6 +2472,7 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	/*
 	 * Re-check the pte - we dropped the lock
 	 */
+	ptl_cnt_inc(mm);
 	vmf->pte = pte_offset_map_lock(mm, vmf->pmd, vmf->address, &vmf->ptl);
 	if (likely(pte_same(*vmf->pte, vmf->orig_pte))) {
 		if (old_page) {
@@ -2518,6 +2540,7 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	if (new_page)
 		put_page(new_page);
 
+	ptl_cnt_dec(mm);
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 	/*
 	 * No need to double call mmu_notifier->invalidate_range() callback as
@@ -2660,6 +2683,7 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 
 	vmf->page = vm_normal_page(vma, vmf->address, vmf->orig_pte);
 	if (!vmf->page) {
+		ptl_cnt_dec(vmf->vma->vm_mm);
 		/*
 		 * VM_MIXEDMAP !pfn_valid() case, or VM_SOFTDIRTY clear on a
 		 * VM_PFNMAP VMA.
@@ -2692,6 +2716,7 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 					vmf->address, &vmf->ptl);
 			if (!pte_same(*vmf->pte, vmf->orig_pte)) {
 				unlock_page(vmf->page);
+				ptl_cnt_dec(vmf->vma->vm_mm);
 				pte_unmap_unlock(vmf->pte, vmf->ptl);
 				put_page(vmf->page);
 				return 0;
@@ -2704,6 +2729,7 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 			unlock_page(vmf->page);
 			if (!reused)
 				goto copy;
+			ptl_cnt_dec(vmf->vma->vm_mm);
 			wp_page_reuse(vmf);
 			return VM_FAULT_WRITE;
 		}
@@ -2719,12 +2745,14 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 				page_move_anon_rmap(vmf->page, vma);
 			}
 			unlock_page(vmf->page);
+			ptl_cnt_dec(vmf->vma->vm_mm);
 			wp_page_reuse(vmf);
 			return VM_FAULT_WRITE;
 		}
 		unlock_page(vmf->page);
 	} else if (unlikely((vma->vm_flags & (VM_WRITE|VM_SHARED)) ==
 					(VM_WRITE|VM_SHARED))) {
+		ptl_cnt_dec(vmf->vma->vm_mm);
 		return wp_page_shared(vmf);
 	}
 copy:
@@ -2733,6 +2761,7 @@ copy:
 	 */
 	get_page(vmf->page);
 
+	ptl_cnt_dec(vmf->vma->vm_mm);
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 	return wp_page_copy(vmf);
 }
@@ -2903,6 +2932,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 			 * Back out if somebody else faulted in this pte
 			 * while we released the pte lock.
 			 */
+			ptl_cnt_inc(vmf->vma->vm_mm);
 			vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd,
 					vmf->address, &vmf->ptl);
 			if (likely(pte_same(*vmf->pte, vmf->orig_pte)))
@@ -2959,6 +2989,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	/*
 	 * Back out if somebody else already faulted in this pte.
 	 */
+	ptl_cnt_inc(vmf->vma->vm_mm);
 	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address,
 			&vmf->ptl);
 	if (unlikely(!pte_same(*vmf->pte, vmf->orig_pte)))
@@ -3034,11 +3065,13 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	/* No need to invalidate - it was non-present before */
 	update_mmu_cache(vma, vmf->address, vmf->pte);
 unlock:
+	ptl_cnt_dec(vmf->vma->vm_mm);
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 out:
 	return ret;
 out_nomap:
 	mem_cgroup_cancel_charge(page, memcg, false);
+	ptl_cnt_dec(vmf->vma->vm_mm);
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 out_page:
 	unlock_page(page);
@@ -3965,6 +3998,7 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 		return do_numa_page(vmf);
 
 	vmf->ptl = pte_lockptr(vmf->vma->vm_mm, vmf->pmd);
+	ptl_cnt_inc(vmf->vma->vm_mm);
 	spin_lock(vmf->ptl);
 	entry = vmf->orig_pte;
 	if (unlikely(!pte_same(*vmf->pte, entry)))
@@ -3989,6 +4023,7 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 			flush_tlb_fix_spurious_fault(vmf->vma, vmf->address);
 	}
 unlock:
+	ptl_cnt_dec(vmf->vma->vm_mm);
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 	return 0;
 }

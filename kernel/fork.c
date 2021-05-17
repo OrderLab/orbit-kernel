@@ -1022,6 +1022,10 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	atomic64_set(&mm->pinned_vm, 0);
 	memset(&mm->rss_stat, 0, sizeof(mm->rss_stat));
 	spin_lock_init(&mm->page_table_lock);
+	atomic_set(&mm->lock_waiters, 0);
+	mm->max_lock_waiters = 0;
+	mm->total_lock_waiters = 0;
+	mm->stat_cnt = 0;
 	spin_lock_init(&mm->arg_lock);
 	mm_init_cpumask(mm);
 	mm_init_aio(mm);
