@@ -67,6 +67,7 @@ struct orbit_task {
 	struct semaphore	finish;
 
 	void __user		*arg;
+	size_t			argsize;
 	unsigned long		retval;
 
 	struct mutex		updates_lock;	/* lock for update list */
@@ -78,6 +79,9 @@ struct orbit_task {
 	/* Memory ranges snapshotted. Variable-sized struct. */
 	size_t			npool;
 	struct pool_snapshot	pools[];
+
+	/* Extra field: char arg_data[] starting at (char*)(pools + npool),
+	 * see orbit_create_task. */
 } __randomize_layout;
 
 struct orbit_info {
@@ -97,14 +101,14 @@ struct orbit_info {
 } __randomize_layout;
 
 static struct orbit_task *orbit_create_task(
-	unsigned long flags, void __user *arg,
+	unsigned long flags, void __user *arg, size_t argsize,
 	size_t npool, struct pool_range __user * pools)
 {
 	struct orbit_task *new_task;
 	size_t i;
 
-	new_task = kmalloc(sizeof(*new_task) + npool * sizeof(struct pool_snapshot),
-		GFP_KERNEL);
+	new_task = kmalloc(sizeof(*new_task) + argsize +
+			npool * sizeof(struct pool_snapshot), GFP_KERNEL);
 	if (new_task == NULL)
 		return NULL;
 
@@ -118,6 +122,7 @@ static struct orbit_task *orbit_create_task(
 		sema_init(&new_task->finish, 0);
 	new_task->retval = 0;
 	new_task->arg = arg;
+	new_task->argsize = argsize;
 	new_task->taskid = 0;	/* taskid will be allocated later */
 	new_task->flags = flags;
 
@@ -131,6 +136,9 @@ static struct orbit_task *orbit_create_task(
 		snap_init(&new_task->pools[i].snapshot);
 		new_task->pools[i].data = NULL;
 	}
+
+	/* TODO: check error of copy_from_user */
+	copy_from_user(new_task->pools + npool, arg, argsize);
 
 	return new_task;
 }
@@ -166,7 +174,7 @@ static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 internalreturn orbit_call_internal(
 	unsigned long flags, unsigned long obid,
 	size_t npool, struct pool_range __user * pools,
-	void __user * arg)
+	void __user * arg, size_t argsize)
 {
 	struct task_struct *ob, *parent;
 	struct vm_area_struct *ob_vma, *parent_vma;
@@ -182,7 +190,7 @@ internalreturn orbit_call_internal(
 	info = ob->orbit_info;
 
 	/* 2. Create a orbit task struct and add to the orbit's task queue. */
-	new_task = orbit_create_task(flags, arg, npool, pools);
+	new_task = orbit_create_task(flags, arg, argsize, npool, pools);
 	if (new_task == NULL)
 		return -ENOMEM;
 
@@ -260,13 +268,14 @@ internalreturn orbit_call_internal(
 	return ret;
 }
 
-SYSCALL_DEFINE5(orbit_call, unsigned long, flags,
+SYSCALL_DEFINE6(orbit_call, unsigned long, flags,
 		unsigned long, obid,
 		size_t, npool,
 		struct pool_range __user *, pools,
-		void __user *, arg)
+		void __user *, arg,
+		size_t, argsize)
 {
-	return orbit_call_internal(flags, obid, npool, pools, arg);
+	return orbit_call_internal(flags, obid, npool, pools, arg, argsize);
 }
 
 #define ORBIT_BUFFER_MAX 4096	/* Maximum buffer size of orbit_update data field */
@@ -567,10 +576,12 @@ internalreturn orbit_return_internal(unsigned long retval)
 	 * memory region.
 	 */
 	printd("task->arg = %p, info->argptr = %p\n", task->arg, info->argptr);
+	/* TODO: check error of copy_to_user */
+	copy_to_user(task->arg, task->pools + task->npool, task->argsize);
 	put_user(task->arg, info->argptr);
 
 	/* 4. Return to userspace to start checker code */
-	return 0;
+	return task->taskid;
 }
 
 SYSCALL_DEFINE1(orbit_return, unsigned long, retval)
