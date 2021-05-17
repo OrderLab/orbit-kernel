@@ -53,6 +53,7 @@ void snap_destroy(struct vma_snapshot *snap);
 struct pool_snapshot {
 	unsigned long start, end;
 	struct vma_snapshot snapshot;
+	char *data;
 };
 
 struct orbit_task {
@@ -128,6 +129,7 @@ static struct orbit_task *orbit_create_task(
 		/* Initialize new_task->pools[i].
 		 * Actual marking is done later in orbit_call. */
 		snap_init(&new_task->pools[i].snapshot);
+		new_task->pools[i].data = NULL;
 	}
 
 	return new_task;
@@ -188,7 +190,8 @@ internalreturn orbit_call_internal(
 
 	/* Serialized marking protected parent mmap_sem.
 	 * We do not allow parallel snapshotting in current design. */
-	if (down_write_killable(&parent->mm->mmap_sem)) {
+	/* if (down_write_killable(&parent->mm->mmap_sem)) { */
+	if (down_read_killable(&parent->mm->mmap_sem)) {
 		ret = -EINTR;
 		panic("orbit call cannot acquire parent sem");
 	}
@@ -198,7 +201,22 @@ internalreturn orbit_call_internal(
 
 		parent_vma = find_vma(parent->mm, pool->start);
 
-		if (0 && list_empty(&info->task_list)) {
+		printd("pool %ld size %ld", i, pool->end - pool->start);
+		if (pool->end - pool->start <= 8192) {
+			pool->data = vmalloc(pool->end - pool->start);
+			if (pool->data) {
+				printd("Orbit allocated %ld\n", pool->end - pool->start);
+			} else {
+				printk("Orbit OOM %ld\n", pool->end - pool->start);
+				panic("Orbit OOM");
+			}
+			up_read(&parent->mm->mmap_sem);
+			copy_from_user(pool->data, (const void __user *)pool->start,
+				pool->end - pool->start);
+			printd("copied\n");
+			if (down_read_killable(&parent->mm->mmap_sem))
+				panic("down failed");
+		} else if (0 && list_empty(&info->task_list)) {
 			/* FIXME: we need ob lock */
 			ob_vma = find_vma(ob->mm, pool->start);
 			ret = update_page_range(ob->mm, parent->mm,
@@ -213,7 +231,8 @@ internalreturn orbit_call_internal(
 		}
 	}
 
-	up_write(&parent->mm->mmap_sem);
+	/* up_write(&parent->mm->mmap_sem); */
+	up_read(&parent->mm->mmap_sem);
 
 	/* Add task to the queue */
 	/* TODO: make killable? */
@@ -431,7 +450,9 @@ internalreturn orbit_return_internal(unsigned long retval)
 	if (task != NULL) {
 		task->retval = retval;
 
+		printd("orbit return locking\n");
 		mutex_lock(&info->task_lock);
+		printd("orbit return locked\n");
 
 		info->next_task = list_is_last(&task->elem, &info->task_list) ?
 					NULL : list_next_entry(task, elem);
@@ -460,20 +481,26 @@ internalreturn orbit_return_internal(unsigned long retval)
 		}
 
 		mutex_unlock(&info->task_lock);
+		printd("orbit return unlocked\n");
 	}
 
 	/* Second half: handle the next task */
 
 	/* 1. Wait for a task to come in */
 	/* TODO: make killable? */
+	printd("orbit return down\n");
 	down(&info->sem);
+	printd("orbit return downed\n");
 	mutex_lock(&info->task_lock);
+	printd("orbit return locked 2\n");
 	info->current_task = task = info->next_task;
 	info->next_task = list_is_last(&task->elem, &info->task_list) ?
 					NULL : list_next_entry(task, elem);
 	mutex_unlock(&info->task_lock);
+	printd("orbit return unlocked 2\n");
 
-	if (down_write_killable(&ob->mm->mmap_sem)) {
+	/* if (down_write_killable(&ob->mm->mmap_sem)) { */
+	if (down_read_killable(&ob->mm->mmap_sem)) {
 		retval = -EINTR;
 		panic("orbit return cannot acquire orbit sem");
 	}
@@ -505,8 +532,20 @@ internalreturn orbit_return_internal(unsigned long retval)
 			pool->end <= ob_vma->vm_start))
 			snapshot_share(ob->mm, parent->mm, parent_vma); */
 
-		printd("snapshot pte count is %ld", pool->snapshot.count);
-		if (pool->snapshot.count != 0)
+		printd("orbit apply pool %ld %d %ld\n", pool - task->pools, !!pool->data, pool->snapshot.count);
+		printd("snapshot pte count is %ld\n", pool->snapshot.count);
+		if (pool->data) {
+			printd("access_ok %ld\n", access_ok(pool->start, pool->end - pool->start));
+			/* up_write(&ob->mm->mmap_sem); */
+			int ret = copy_to_user((void __user *)pool->start, pool->data,
+				pool->end - pool->start);
+			/* if (down_write_killable(&ob->mm->mmap_sem))
+				panic("down failed"); */
+			printd("orbit apply data success %d\n", ret);
+			vfree(pool->data);
+			printd("orbit apply freed\n");
+			pool->data = NULL;
+		} else if (pool->snapshot.count != 0)
 			update_page_range(ob->mm, NULL, ob_vma, NULL,
 				pool->start, pool->end, ORBIT_UPDATE_APPLY,
 				&pool->snapshot);
@@ -515,7 +554,9 @@ internalreturn orbit_return_internal(unsigned long retval)
 #endif
 	}
 
-	up_write(&ob->mm->mmap_sem);
+	/* up_write(&ob->mm->mmap_sem); */
+	up_read(&ob->mm->mmap_sem);
+	printd("orbit apply up\n");
 
 	/* 3. Setup the user argument to call entry_func.
 	 * Current implementation is that the user runtime library passes
