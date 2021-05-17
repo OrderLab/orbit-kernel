@@ -1774,14 +1774,18 @@ static void copy_oom_score_adj(u64 clone_flags, struct task_struct *tsk)
 	mutex_unlock(&oom_adj_mutex);
 }
 
-#define CKPT 1
+#define CKPT 0
 
+#if CKPT
 #define ckpt(s)	\
-	do { if(CKPT && orbit) { ckpts[tcnt++] = (struct ckpt_t) {	\
+	do { if(orbit) { ckpts[tcnt++] = (struct ckpt_t) {	\
 		.clk = get_cycles(),	\
 		.t = ktime_get_ns(),	\
 		.name = s,	\
 	}; } } while (0)
+#else
+#define ckpt(s) do {} while (0)
+#endif
 
 /*
  * This creates a new process as a copy of the old one,
@@ -1803,6 +1807,7 @@ static __latent_entropy struct task_struct *copy_process(
 	struct file *pidfile = NULL;
 	u64 clone_flags = args->flags;
 
+#if CKPT
 	/* int orbit = !!(clone_flags & (CLONE_ORBIT | 0x000200000000ULL)); */
 	int orbit = 1;
 	int tcnt = 0;
@@ -1813,6 +1818,7 @@ static __latent_entropy struct task_struct *copy_process(
 	} ckpts[32];
 
 	ckpt("init");
+#endif
 
 	/*
 	 * Don't allow sharing the root directory with processes in a different
@@ -2315,8 +2321,9 @@ static __latent_entropy struct task_struct *copy_process(
 
 	ckpt("rest");
 
-	int i = 0;
-	if (CKPT && orbit) {
+#if CKPT
+	if (orbit) {
+		int i;
 		printk("copy_process total %llu ns, %llu cycles\n",
 			ckpts[tcnt - 1].t - ckpts[0].t, ckpts[tcnt - 1].clk - ckpts[0].clk);
 		for (i = 1; i < tcnt; ++i) {
@@ -2325,6 +2332,7 @@ static __latent_entropy struct task_struct *copy_process(
 				ckpts[i].clk - ckpts[i-1].clk);
 		}
 	}
+#endif
 
 	return p;
 
@@ -2556,12 +2564,16 @@ pid_t kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
 		.stack_size	= (unsigned long)arg,
 	};
 
+#if 0
 	u64 t1 = ktime_get_ns();
 	cycles_t c1 = get_cycles();
+#endif
 	long ret = _do_fork(&args);
+#if 0
 	u64 t2 = ktime_get_ns();
 	cycles_t c2 = get_cycles();
 	printk("kernel_thread creation takes %llu ns, %llu cycles\n", t2 - t1, c2 - c1);
+#endif
 
 	return ret;
 }
