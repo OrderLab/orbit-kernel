@@ -17,6 +17,8 @@
 
 #define DBG 0
 
+/* CAUTION: This naive printd MUST NOT be used before any immediate `else'.
+ * Add explicit brackets when using printd in an `if' statement. */
 #define printd if(DBG)printk
 
 #define whatis(x) printd(#x " is %lu\n", x)
