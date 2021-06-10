@@ -41,6 +41,7 @@ typedef void*(*orbit_entry)(void*);
 struct pool_range {
 	unsigned long start;
 	unsigned long end;
+	bool cow;
 };
 
 /* Duplicated struct definition, should be eventually moved to mm.h */
@@ -55,6 +56,7 @@ void snap_destroy(struct vma_snapshot *snap);
 
 struct pool_snapshot {
 	unsigned long start, end;
+	bool cow;
 	struct vma_snapshot snapshot;
 	char *data;
 };
@@ -134,6 +136,7 @@ static struct orbit_task *orbit_create_task(
 	for (i = 0; i < npool; ++i) {
 		get_user(new_task->pools[i].start, &pools[i].start);
 		get_user(new_task->pools[i].end, &pools[i].end);
+		get_user(new_task->pools[i].cow, &pools[i].cow);
 		/* Initialize new_task->pools[i].
 		 * Actual marking is done later in orbit_call. */
 		snap_init(&new_task->pools[i].snapshot);
@@ -292,17 +295,24 @@ internalreturn orbit_call_internal(
 		parent_vma = find_vma(parent->mm, pool->start);
 
 		printd("pool %ld size %ld", i, pool->end - pool->start);
-		if (pool->end - pool->start <= 8192) {
-			pool->data = vmalloc(pool->end - pool->start);
+		/* TODO: kernel rules for cow */
+		/* if (pool->end - pool->start <= 8192) { */
+		if (!pool->cow) {
+			size_t pool_size = pool->end - pool->start;
+			if (pool_size == 0) {
+				pool->data = NULL;
+				continue;
+			}
+			pool->data = vmalloc(pool_size);
 			if (pool->data) {
-				printd("Orbit allocated %ld\n", pool->end - pool->start);
+				printd("Orbit allocated %ld\n", pool_size);
 			} else {
-				printk("Orbit OOM %ld\n", pool->end - pool->start);
+				printk("Orbit OOM %ld\n", pool_size);
 				panic("Orbit OOM");
 			}
 			up_read(&parent->mm->mmap_sem);
 			copy_from_user(pool->data, (const void __user *)pool->start,
-				pool->end - pool->start);
+				pool_size);
 			printd("copied\n");
 			if (down_read_killable(&parent->mm->mmap_sem))
 				panic("down failed");
@@ -644,6 +654,9 @@ internalreturn orbit_return_internal(unsigned long retval)
 
 	/* 2. Snapshot the page range */
 	for (pool = task->pools; pool < task->pools + task->npool; ++pool) {
+		/* FIXME: this should be in a generic logic */
+		if (pool->start == pool->end)
+			continue;
 		/* TODO: vma return value error handling */
 		ob_vma = find_vma(ob->mm, pool->start);
 		/* vma_interval_tree_iter_first() */
