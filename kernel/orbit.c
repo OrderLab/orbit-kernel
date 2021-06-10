@@ -252,16 +252,16 @@ internalreturn orbit_call_internal(
 	unsigned long ret;
 	size_t i;
 
-	static u64 last_ns = 0;
-	if (CKPT && last_ns == 0)
-		last_ns = ktime_get_ns();
-
 	static int tcnt = 0;
 	static struct ckpt_t {
 		cycles_t clk;
 		u64 t;
 		const char *name;
 	} ckpts[32] = { { 0, 0, NULL, }, };
+
+	static u64 last_ns = 0;
+	if (CKPT && last_ns == 0)
+		last_ns = ktime_get_ns();
 
 	ckpt("init");
 

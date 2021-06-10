@@ -5175,17 +5175,6 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	struct page *page;
 	bool should_panic = false;
 
-	if (mode == ORBIT_UPDATE_APPLY) {
-		struct snap_entry *s = snap_front(snap);
-		if (s == NULL)
-			printk("warning: orbit snapshot consumed, %p", dst_pte);
-		if (s == NULL || s->addr != addr)
-			return 0;
-		pte = s->ptent;
-		snap_pop(snap);
-		goto out_set_pte;
-	}
-
 	static int tcnt = 0;
 	static struct ckpt_t {
 		cycles_t clk;
@@ -5202,6 +5191,17 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		{ 0, 0, "snappush", },
 	};
 
+	if (mode == ORBIT_UPDATE_APPLY) {
+		struct snap_entry *s = snap_front(snap);
+		if (s == NULL)
+			printk("warning: orbit snapshot consumed, %p", dst_pte);
+		if (s == NULL || s->addr != addr)
+			return 0;
+		pte = s->ptent;
+		snap_pop(snap);
+		goto out_set_pte;
+	}
+
 	pte = *src_pte;
 	vm_flags = src_vma->vm_flags;
 
@@ -5210,6 +5210,8 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 
 	/* pte contains position in swap or file, so copy. */
 	if (unlikely(!pte_present(pte))) {
+		swp_entry_t entry;
+
 		/* Dirty page update mode. */
 		/* Source is not present, then no need to update dst. Skip. */
 		/* TODO: support swap or file. */
@@ -5227,7 +5229,7 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 			printk("Orbit mark with src in swap not supported: %016lx %016lx.", pte_val(pte), addr);
 		}
 
-		swp_entry_t entry = pte_to_swp_entry(pte);
+		entry = pte_to_swp_entry(pte);
 
 		if (likely(!non_swap_entry(entry))) {
 			if (should_panic) panic("Is a swap entry %016lx", entry.val);
@@ -5410,6 +5412,8 @@ static int update_pte_range(
 		const char *name;
 	} ckpts[32] = { { 0, 0, NULL, }, };
 	bool doprint = false;
+	cycles_t clk;
+	/* u64 t; */
 
 	/* zap operations */
 	if (dst_mm)
@@ -5459,8 +5463,6 @@ again:
 			addr = end;
 			break;
 		}
-		cycles_t clk;
-		u64 t;
 		if (CKPT && mode == ORBIT_UPDATE_MARK) {
 			clk = get_cycles();
 			/* t = ktime_get_ns(); */
@@ -5496,7 +5498,6 @@ again:
 
 	if (orig_dst_pte)
 		pte_unmap_unlock(orig_dst_pte, dst_ptl);
-	cycles_t clk;
 	if (CKPT && mode == ORBIT_UPDATE_MARK)
 		clk = get_cycles();
 	/* u64 t = ktime_get_ns(); */
@@ -5604,6 +5605,8 @@ static inline int update_pmd_range(
 		return -ENOMEM;
 	src_pmd = src_mm ? pmd_offset(src_pud, addr) : NULL;
 	do {
+		cycles_t clk;
+		/* u64 t; */
 		next = pmd_addr_end(addr, end);
 		/* TODO: huge page */
 		if (src_pmd && dst_pmd &&
@@ -5626,8 +5629,6 @@ static inline int update_pmd_range(
 		if (mode == ORBIT_UPDATE_APPLY && snap_empty(snap))
 			break;
 
-		cycles_t clk;
-		u64 t;
 		if (CKPT && mode == ORBIT_UPDATE_MARK) {
 			clk = get_cycles();
 			/* t = ktime_get_ns(); */
@@ -5875,7 +5876,7 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 
 		printk("update_page_range total %llu ns, %llu cycles\n",
 			ckpts[total - 1].t / tcnt, ckpts[total - 1].clk / tcnt);
-		printk("pmdcnt = %d, tcnt = %d, pmdcnt / tcnt = %d, pgcnt = %d, snapcnt %d\n",
+		printk("pmdcnt = %d, tcnt = %d, pmdcnt / tcnt = %d, pgcnt = %d, snapcnt %ld\n",
 			pmdcnt, tcnt, pmdcnt/ tcnt, pagecnt / tcnt, snap->count);
 
 		ckpts[0].t = 0;
