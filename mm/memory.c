@@ -5653,6 +5653,7 @@ static inline int update_pmd_range(
 
 	return 0;
 }
+#undef CKPT
 
 static inline int update_pud_range(
 	struct mm_struct *dst_mm, struct mm_struct *src_mm,
@@ -5728,6 +5729,8 @@ static inline int update_p4d_range(
 }
 
 enum { COUNTER_BASE = __COUNTER__ };
+
+#define CKPT 0
 
 #define ckpt(s) \
 	do { if(CKPT && mode == ORBIT_UPDATE_MARK) { \
