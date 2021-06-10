@@ -289,6 +289,11 @@ internalreturn orbit_call_internal(
 	ckpt("down_mmap_sem");
 
 #if 1
+	/* WON'T FIX: If you found weirdly high latency in CKPT for "begin-cow",
+	 * changing snapshot order may help. This is because ckpt macro
+	 * uses COUNTER macro and it subtracts from "after-down" instead
+	 * of "down_mmap_sem". */
+	/* for (i = npool; i--; ) { */
 	for (i = 0; i < npool; ++i) {
 		struct pool_snapshot *pool = new_task->pools + i;
 
@@ -303,6 +308,7 @@ internalreturn orbit_call_internal(
 				pool->data = NULL;
 				continue;
 			}
+			ckpt("before-vmalloc");
 			pool->data = vmalloc(pool_size);
 			if (pool->data) {
 				printd("Orbit allocated %ld\n", pool_size);
@@ -310,12 +316,16 @@ internalreturn orbit_call_internal(
 				printk("Orbit OOM %ld\n", pool_size);
 				panic("Orbit OOM");
 			}
+			ckpt("before-up");
 			up_read(&parent->mm->mmap_sem);
+			ckpt("begin-copy");
 			copy_from_user(pool->data, (const void __user *)pool->start,
 				pool_size);
+			ckpt("end-copy");
 			printd("copied\n");
 			if (down_read_killable(&parent->mm->mmap_sem))
 				panic("down failed");
+			ckpt("after-down");
 		} else if (0 && list_empty(&info->task_list)) {
 			/* FIXME: we need ob lock */
 			ob_vma = find_vma(ob->mm, pool->start);
@@ -324,10 +334,12 @@ internalreturn orbit_call_internal(
 				pool->start, pool->end,
 				ORBIT_UPDATE_SNAPSHOT, NULL);
 		} else {
+			ckpt("begin-cow");
 			ret = update_page_range(NULL, parent->mm,
 				NULL, parent_vma,
 				pool->start, pool->end,
 				ORBIT_UPDATE_MARK, &pool->snapshot);
+			ckpt("end-cow");
 		}
 	}
 #else
@@ -340,10 +352,12 @@ internalreturn orbit_call_internal(
 
 	/* up_write(&parent->mm->mmap_sem); */
 	up_read(&parent->mm->mmap_sem);
+	ckpt("up-sem");
 
 	/* Add task to the queue */
 	/* TODO: make killable? */
 	mutex_lock(&info->task_lock);
+	ckpt("task-lock");
 
 	/* Allocate taskid; valid taskid starts from 1 */
 	/* TODO: will this overflow? */
@@ -351,10 +365,12 @@ internalreturn orbit_call_internal(
 	list_add_tail(&new_task->elem, &info->task_list);
 	if (info->next_task == NULL)
 		info->next_task = new_task;
+	ckpt("task-push");
 	mutex_unlock(&info->task_lock);
+	ckpt("task-unlock");
 	up(&info->sem);
-
-	ckpt("push_task");
+	ckpt("task-upsem");
+	/* end push task */
 
 	if (CKPT) {
 		int total = __COUNTER__ - COUNTER_BASE - 1;
