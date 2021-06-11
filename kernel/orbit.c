@@ -188,7 +188,7 @@ internalreturn orbit_call_internal(
 	struct vm_area_struct *ob_vma, *parent_vma;
 	struct orbit_info *info;
 	struct orbit_task *new_task;
-	unsigned long ret;
+	unsigned long ret, taskid;
 	size_t i;
 
 	/* TODO: allow orbit to determine maximum acceptable arg buf size */
@@ -267,7 +267,7 @@ internalreturn orbit_call_internal(
 
 	/* Allocate taskid; valid taskid starts from 1 */
 	/* TODO: will this overflow? */
-	new_task->taskid = ++info->taskid_counter;
+	taskid = new_task->taskid = ++info->taskid_counter;
 	list_add_tail(&new_task->elem, &info->task_list);
 	if (info->next_task == NULL)
 		info->next_task = new_task;
@@ -276,7 +276,7 @@ internalreturn orbit_call_internal(
 
 	/* 3. Return from main in async mode, */
 	if (flags & ORBIT_ASYNC)
-		return new_task->taskid;
+		return taskid;
 	/* or wait for the task to finish */
 	down(&new_task->finish);	/* TODO: make killable? */
 	ret = new_task->retval;
