@@ -36,6 +36,8 @@ typedef void*(*orbit_entry)(void*);
 #define ORBIT_NORETVAL		2	/* Whether we want the return value.
 					 * This option is ignored in async. */
 
+#define ARG_SIZE_MAX 1024
+
 /* FIXME: `start` and `end` should be platform-independent (void __user *)? */
 struct pool_range {
 	unsigned long start;
@@ -89,7 +91,7 @@ struct orbit_task {
 } __randomize_layout;
 
 struct orbit_info {
-	void __user		**argptr;
+	void __user		*argbuf;
 
 	struct semaphore	sem;
 	struct mutex		task_lock;
@@ -143,12 +145,13 @@ static struct orbit_task *orbit_create_task(
 	}
 
 	/* TODO: check error of copy_from_user */
-	copy_from_user(new_task->pools + npool, arg, argsize);
+	if (argsize)
+		copy_from_user(new_task->pools + npool, arg, argsize);
 
 	return new_task;
 }
 
-struct orbit_info *orbit_create_info(void __user **argptr)
+struct orbit_info *orbit_create_info(void __user *argbuf)
 {
 	struct orbit_info *info;
 
@@ -160,7 +163,7 @@ struct orbit_info *orbit_create_info(void __user **argptr)
 	sema_init(&info->sem, 0);
 	mutex_init(&info->task_lock);
 	info->current_task = info->next_task = NULL;
-	info->argptr = argptr;
+	info->argbuf = argbuf;
 	info->taskid_counter = 0;	/* valid taskid starts from 1 */
 
 	return info;
@@ -187,6 +190,10 @@ internalreturn orbit_call_internal(
 	struct orbit_task *new_task;
 	unsigned long ret;
 	size_t i;
+
+	/* TODO: allow orbit to determine maximum acceptable arg buf size */
+	if (argsize >= ARG_SIZE_MAX)
+		return -EINVAL;
 
 	/* 1. Find the orbit context by obid, currently we only support one
 	 * orbit entity per process, thus we will ignore the obid. */
@@ -584,16 +591,15 @@ internalreturn orbit_return_internal(unsigned long retval)
 
 	/* 3. Setup the user argument to call entry_func.
 	 * Current implementation is that the user runtime library passes
-	 * a pointer to the arg (void **) to the orbit_create call.
+	 * a pointer to a buffer (void*) of size ARG_SIZE_MAX to orbit_create.
 	 * Upon each orbit_call, the father passes a argument pointer to the
-	 * syscall. The kernel will write the pointer to the arg pointer.
-	 * TODO: For now we require the argument to be stored in the snapshotted
-	 * memory region.
+	 * syscall. The kernel will copy the arg to kernel space and copy to
+	 * the argbuf upon orbit_return.
 	 */
-	printd("task->arg = %p, info->argptr = %p\n", task->arg, info->argptr);
+	printd("task->arg = %p, info->argbuf = %p\n", task->arg, info->argbuf);
 	/* TODO: check error of copy_to_user */
-	copy_to_user(task->arg, task->pools + task->npool, task->argsize);
-	put_user(task->arg, info->argptr);
+	if (task->argsize)
+		copy_to_user(info->argbuf, task->pools + task->npool, task->argsize);
 
 	/* 4. Return to userspace to start checker code */
 	return task->taskid;
