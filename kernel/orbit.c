@@ -39,6 +39,8 @@ typedef void*(*orbit_entry)(void*);
 #define ORBIT_NORETVAL		2	/* Whether we want the return value.
 					 * This option is ignored in async. */
 
+#define ARG_SIZE_MAX 1024
+
 /* FIXME: `start` and `end` should be platform-independent (void __user *)? */
 struct pool_range {
 	unsigned long start;
@@ -92,7 +94,7 @@ struct orbit_task {
 } __randomize_layout;
 
 struct orbit_info {
-	void __user		**argptr;
+	void __user		*argbuf;
 
 	struct semaphore	sem;
 	struct mutex		task_lock;
@@ -146,7 +148,8 @@ static struct orbit_task *orbit_create_task(
 	}
 
 	/* TODO: check error of copy_from_user */
-	copy_from_user(new_task->pools + npool, arg, argsize);
+	if (argsize)
+		copy_from_user(new_task->pools + npool, arg, argsize);
 
 	return new_task;
 }
@@ -190,7 +193,7 @@ static void timing_reference(void)
 	printk("avg cycles for spin unlock: %lld\n", clk3 / 10);
 }
 
-struct orbit_info *orbit_create_info(void __user **argptr)
+struct orbit_info *orbit_create_info(void __user *argbuf)
 {
 	struct orbit_info *info;
 
@@ -204,7 +207,7 @@ struct orbit_info *orbit_create_info(void __user **argptr)
 	sema_init(&info->sem, 0);
 	mutex_init(&info->task_lock);
 	info->current_task = info->next_task = NULL;
-	info->argptr = argptr;
+	info->argbuf = argbuf;
 	info->taskid_counter = 0;	/* valid taskid starts from 1 */
 
 	return info;
@@ -249,7 +252,7 @@ internalreturn orbit_call_internal(
 	struct vm_area_struct *ob_vma, *parent_vma;
 	struct orbit_info *info;
 	struct orbit_task *new_task;
-	unsigned long ret;
+	unsigned long ret, taskid;
 	size_t i;
 
 	static int tcnt = 0;
@@ -264,6 +267,10 @@ internalreturn orbit_call_internal(
 		last_ns = ktime_get_ns();
 
 	ckpt("init");
+
+	/* TODO: allow orbit to determine maximum acceptable arg buf size */
+	if (argsize >= ARG_SIZE_MAX)
+		return -EINVAL;
 
 	/* 1. Find the orbit context by obid, currently we only support one
 	 * orbit entity per process, thus we will ignore the obid. */
@@ -363,7 +370,7 @@ internalreturn orbit_call_internal(
 
 	/* Allocate taskid; valid taskid starts from 1 */
 	/* TODO: will this overflow? */
-	new_task->taskid = ++info->taskid_counter;
+	taskid = new_task->taskid = ++info->taskid_counter;
 	list_add_tail(&new_task->elem, &info->task_list);
 	if (info->next_task == NULL)
 		info->next_task = new_task;
@@ -400,7 +407,7 @@ internalreturn orbit_call_internal(
 
 	/* 3. Return from main in async mode, */
 	if (flags & ORBIT_ASYNC)
-		return new_task->taskid;
+		return taskid;
 	/* or wait for the task to finish */
 	down(&new_task->finish);	/* TODO: make killable? */
 	ret = new_task->retval;
@@ -728,16 +735,15 @@ internalreturn orbit_return_internal(unsigned long retval)
 
 	/* 3. Setup the user argument to call entry_func.
 	 * Current implementation is that the user runtime library passes
-	 * a pointer to the arg (void **) to the orbit_create call.
+	 * a pointer to a buffer (void*) of size ARG_SIZE_MAX to orbit_create.
 	 * Upon each orbit_call, the father passes a argument pointer to the
-	 * syscall. The kernel will write the pointer to the arg pointer.
-	 * TODO: For now we require the argument to be stored in the snapshotted
-	 * memory region.
+	 * syscall. The kernel will copy the arg to kernel space and copy to
+	 * the argbuf upon orbit_return.
 	 */
-	printd("task->arg = %p, info->argptr = %p\n", task->arg, info->argptr);
+	printd("task->arg = %p, info->argbuf = %p\n", task->arg, info->argbuf);
 	/* TODO: check error of copy_to_user */
-	copy_to_user(task->arg, task->pools + task->npool, task->argsize);
-	put_user(task->arg, info->argptr);
+	if (task->argsize)
+		copy_to_user(info->argbuf, task->pools + task->npool, task->argsize);
 
 	/* 4. Return to userspace to start checker code */
 	return task->taskid;
@@ -861,6 +867,10 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 	ret = update_page_range(parent->mm, ob->mm, parent_vma, ob_vma,
 		scratch_start, scratch_end,
 		ORBIT_UPDATE_SNAPSHOT, NULL);
+	if (ret) {
+		kfree(new_update);
+		return ret;
+	}
 
 	mutex_lock(&current_task->updates_lock);
 	refcount_inc(&current_task->refcount);
@@ -868,7 +878,7 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 	mutex_unlock(&current_task->updates_lock);
 	up(&current_task->updates_sem);
 
-	return ret;
+	return 0;
 }
 
 SYSCALL_DEFINE1(orbit_sendv, struct orbit_scratch __user *, s)

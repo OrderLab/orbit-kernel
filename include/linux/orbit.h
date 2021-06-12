@@ -8,6 +8,6 @@
  * process is an orbit. */
 struct orbit_info;
 
-struct orbit_info *orbit_create_info(void __user **argptr);
+struct orbit_info *orbit_create_info(void __user *argptr);
 
 #endif /* __ORBIT_H__ */
