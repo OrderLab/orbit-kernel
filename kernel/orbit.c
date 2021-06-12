@@ -723,6 +723,10 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 	ret = update_page_range(parent->mm, ob->mm, parent_vma, ob_vma,
 		scratch_start, scratch_end,
 		ORBIT_UPDATE_SNAPSHOT, NULL);
+	if (ret) {
+		kfree(new_update);
+		return ret;
+	}
 
 	mutex_lock(&current_task->updates_lock);
 	refcount_inc(&current_task->refcount);
@@ -730,7 +734,7 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 	mutex_unlock(&current_task->updates_lock);
 	up(&current_task->updates_sem);
 
-	return ret;
+	return 0;
 }
 
 SYSCALL_DEFINE1(orbit_sendv, struct orbit_scratch __user *, s)
