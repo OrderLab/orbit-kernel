@@ -1,4 +1,6 @@
 #include <linux/orbit.h>
+#include <linux/types.h>
+#include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/slab.h>
@@ -14,6 +16,8 @@
 #include <linux/mempolicy.h>
 #include <linux/rmap.h>
 #include <linux/userfaultfd_k.h>
+
+#define PREFIX      "orbit: "
 
 #define DBG 0
 
@@ -37,6 +41,9 @@ typedef void*(*orbit_entry)(void*);
 					 * This option is ignored in async. */
 
 #define ARG_SIZE_MAX 1024
+
+/* Orbit name max length */
+#define ORBIT_NAME_LEN   16
 
 /* FIXME: `start` and `end` should be platform-independent (void __user *)? */
 struct pool_range {
@@ -88,7 +95,7 @@ struct orbit_task {
 
 	/* Extra field: char arg_data[] starting at (char*)(pools + npool),
 	 * see orbit_create_task. */
-} __randomize_layout;
+};
 
 struct orbit_info {
 	void __user		*argbuf;
@@ -104,7 +111,13 @@ struct orbit_info {
 	/* Pointer to the next task. NULL when queue is empty. This field will
 	 * be updated when inserting or popping a task into/from the queue. */
 	struct orbit_task	*next_task;
-} __randomize_layout;
+
+	pid_t mpid; /* PID of the attached main program */
+	pid_t gobid; /* PID of this orbit task, globally unique */
+	obid_t lobid; /* Orbit id, starting from 1. It is locally unique
+                     to the main program.*/
+	char name[ORBIT_NAME_LEN]; /* Name of orbit */
+};
 
 static struct orbit_task *orbit_create_task(
 	unsigned long flags, void __user *arg, size_t argsize,
@@ -145,15 +158,54 @@ static struct orbit_task *orbit_create_task(
 	}
 
 	/* TODO: check error of copy_from_user */
+	// FIXME: npool can be 0 when argsize is > 0
 	if (argsize)
 		copy_from_user(new_task->pools + npool, arg, argsize);
 
 	return new_task;
 }
 
-struct orbit_info *orbit_create_info(void __user *argbuf)
+SYSCALL_DEFINE4(orbit_create, const char __user *, name, void __user *, argbuf,
+		pid_t __user *, mpid, obid_t __user *, lobid)
+{
+	struct task_struct *p;
+	struct orbit_info *info;
+	struct pid *pid;
+
+	p = fork_to_orbit(name, argbuf);
+	if (IS_ERR(p))
+		return PTR_ERR(p);
+	info = p->orbit_info;
+	if (info == NULL)
+		return -EINVAL;
+
+	/* setup other fields of orbit_info */
+	// the main PID of the orbit task is the current task's PID
+	info->mpid = task_pid_nr(current);
+	pid = get_task_pid(p, PIDTYPE_PID);
+	info->gobid = pid_vnr(pid);
+	// set the orbit id to the main program's last id + 1
+	info->lobid = ++p->last_obid;
+	printk(KERN_INFO PREFIX
+	       "created orbit task '%s' <LOID %d, GOID %d> for main program <PID %d>\n",
+	       info->name, info->lobid, info->gobid, info->mpid);
+	// if user pointers are not null, save the orbit ids
+	if (lobid != NULL)
+		put_user(info->lobid, lobid);
+	if (mpid != NULL)
+		put_user(info->mpid, mpid);
+
+	// waking up the orbit task before we return
+	wake_up_new_task(p);
+	put_pid(pid);
+	return info->gobid;
+}
+
+struct orbit_info *orbit_create_info(const char __user *name,
+				     void __user *argbuf)
 {
 	struct orbit_info *info;
+	int error;
 
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
 	if (info == NULL)
@@ -164,7 +216,11 @@ struct orbit_info *orbit_create_info(void __user *argbuf)
 	mutex_init(&info->task_lock);
 	info->current_task = info->next_task = NULL;
 	info->argbuf = argbuf;
-	info->taskid_counter = 0;	/* valid taskid starts from 1 */
+	info->taskid_counter = 0; /* valid taskid starts from 1 */
+	error = strncpy_from_user(info->name, name, ORBIT_NAME_LEN);
+	if (error <= 0) {
+		strcpy(info->name, "anonymous");
+	}
 
 	return info;
 }

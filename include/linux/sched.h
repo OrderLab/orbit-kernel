@@ -812,11 +812,17 @@ struct task_struct {
 	struct task_struct		*group_leader;
 
 	/*
-	 * Orbit entities
-	 * For now we assume a proc can only have at most one orbit child. */
-	struct task_struct		*orbit_child;
-	unsigned			is_orbit:1;	/* Whether we are orbit. */
-	struct orbit_info		*orbit_info;
+	 * Obi-wan changes
+	 */
+
+	/* For now we assume a proc can only have at most one orbit child. */
+	struct task_struct *orbit_child;
+	unsigned is_orbit : 1; /* Whether we are orbit. */
+	struct orbit_info *orbit_info;
+
+	struct list_head orbit_children;
+	struct list_head orbit_sibling;
+	obid_t last_obid;
 
 	/*
 	 * 'ptraced' is the list of tasks this task is using ptrace() on.

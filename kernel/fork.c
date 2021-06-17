@@ -1917,10 +1917,12 @@ static __latent_entropy struct task_struct *copy_process(
 	p->flags |= PF_FORKNOEXEC;
 	INIT_LIST_HEAD(&p->children);
 	INIT_LIST_HEAD(&p->sibling);
+
 	/* Orbit */
 	p->orbit_child = NULL;
 	p->is_orbit = 0;
 	p->orbit_info = NULL;
+	p->last_obid = 0; // orbit id start from 1
 
 	rcu_copy_process(p);
 	p->vfork_done = NULL;
@@ -2080,33 +2082,6 @@ static __latent_entropy struct task_struct *copy_process(
 		retval = put_user(pidfd, args->pidfd);
 		if (retval)
 			goto bad_fork_put_pidfd;
-	}
-
-	/* FIXME: dealloc orbit_info in process exit to prevent memory leak. */
-	/*
-	 * Orbit setup
-	 */
-	// TODO: allow multiple orbit; allow orbit to attach process, thread, orbit
-	if (clone_flags & CLONE_ORBIT) {
-		if (current->group_leader->orbit_child != NULL) {
-			printk("Unimplemented: currently only support one "
-				"orbit instance.");
-			goto bad_fork_put_pidfd;
-		}
-
-		/* We do not store orbit info in the parent. */
-		p->orbit_info = orbit_create_info(args->orbit_argbuf);
-		if (p->orbit_info == NULL)
-			goto bad_fork_put_pidfd;
-		/* If any error happens after here, goto bad_orbit_creation */
-
-		current->group_leader->orbit_child = p;
-		p->orbit_child = current->group_leader;
-		p->is_orbit = 1;
-	} else {
-		/* FIXME: orbit should be shared among thread group, regardless
-		 * creation order. */
-		p->orbit_child = NULL;
 	}
 
 #ifdef CONFIG_BLOCK
@@ -2285,8 +2260,6 @@ bad_fork_cancel_cgroup:
 	cgroup_cancel_fork(p);
 bad_fork_cgroup_threadgroup_change_end:
 	cgroup_threadgroup_change_end(current);
-/* bad_orbit_creation: */
-	kfree(p->orbit_info);
 bad_fork_put_pidfd:
 	if (clone_flags & CLONE_PIDFD) {
 		fput(pidfile);
@@ -2571,24 +2544,51 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 }
 #endif
 
-SYSCALL_DEFINE1(orbit_create, void __user *, orbit_argbuf)
+struct task_struct *fork_to_orbit(const char __user *name, void __user *argbuf)
 {
-	const u64 clone_flags = (/*CLONE_VM */CLONE_FS | /*| CLONE_FILES |*/ CLONE_SYSVSEM
-				/* | CLONE_SIGHAND | CLONE_THREAD */
-				/* | CLONE_SETTLS */ | CLONE_PARENT_SETTID
-				| CLONE_CHILD_CLEARTID
-				| CLONE_ORBIT);
-	/* const int flags = CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD; */
-
 	struct kernel_clone_args args = {
-		.flags		= clone_flags,
-		.exit_signal	= -1,
-		.orbit_argbuf	= orbit_argbuf,
+		.flags = CLONE_FS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID |
+			 CLONE_ORBIT,
+		.exit_signal = -1,
 	};
 
-	long ret = _do_fork(&args);
-	printk("in orbit_create, do fork returns %ld\n", ret);
-	return ret;
+	struct task_struct *task;
+	task = copy_process(NULL, 0, NUMA_NO_NODE, &args);
+	if (IS_ERR(task))
+		return task;
+	task->orbit_info = orbit_create_info(name, argbuf);
+	if (task->orbit_info == NULL) {
+		printk("failed to allocate orbit info\n");
+		goto bad_orbit_setup;
+	}
+	INIT_LIST_HEAD(&task->orbit_children);
+	INIT_LIST_HEAD(&task->orbit_sibling);
+	if (current->group_leader->orbit_child != NULL) {
+		printk("Unimplemented: currently only support one orbit instance.");
+		goto bad_orbit_setup;
+	}
+	current->group_leader->orbit_child = task;
+	task->orbit_child = current->group_leader;
+	task->is_orbit = 1;
+
+	// NOTE: here we simply return the newly created task struct. The caller
+	// may perform additional setup and is responsible for waking up the
+	// new task to complete the forking.
+	return task;
+
+bad_orbit_setup:
+	if (task->orbit_info)
+		kfree(task->orbit_info);
+	exit_thread(task);
+	exit_task_namespaces(task);
+	if (task->mm) {
+		mm_clear_owner(task->mm, task);
+		mmput(task->mm);
+	}
+	task->state = TASK_DEAD;
+	put_task_stack(task);
+	delayed_free_task(task);
+	return ERR_PTR(-EINVAL);
 }
 
 #ifdef __ARCH_WANT_SYS_CLONE3
