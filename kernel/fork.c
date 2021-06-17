@@ -1919,7 +1919,7 @@ static __latent_entropy struct task_struct *copy_process(
 	INIT_LIST_HEAD(&p->sibling);
 
 	/* Orbit */
-	p->orbit_child = NULL;
+	p->orbit_main = NULL;
 	p->is_orbit = 0;
 	p->orbit_info = NULL;
 	p->last_obid = 0; // orbit id start from 1
@@ -2563,8 +2563,7 @@ struct task_struct *fork_to_orbit(const char __user *name, void __user *argbuf)
 		printk("failed to allocate orbit info\n");
 		goto bad_orbit_setup;
 	}
-	current->group_leader->orbit_child = task;
-	task->orbit_child = current->group_leader;
+	task->orbit_main = current->group_leader;
 	task->is_orbit = 1;
 
 	// NOTE: here we simply return the newly created task struct. The caller

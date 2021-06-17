@@ -815,8 +815,8 @@ struct task_struct {
 	 * Obi-wan changes
 	 */
 
-	/* For now we assume a proc can only have at most one orbit child. */
-	struct task_struct *orbit_child;
+	/* The target main program of the orbit */
+	struct task_struct *orbit_main;
 	unsigned is_orbit : 1; /* Whether we are orbit. */
 	struct orbit_info *orbit_info;
 
