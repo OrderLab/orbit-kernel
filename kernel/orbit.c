@@ -176,8 +176,12 @@ SYSCALL_DEFINE4(orbit_create, const char __user *, name, void __user *, argbuf,
 	if (IS_ERR(p))
 		return PTR_ERR(p);
 	info = p->orbit_info;
-	if (info == NULL)
+	if (info == NULL) {
+		printk(KERN_ERR PREFIX "orbit_info is unexpectedly NULL\n");
 		return -EINVAL;
+	}
+
+	list_add_tail(&p->orbit_sibling, &current->orbit_children);
 
 	/* setup other fields of orbit_info */
 	// the main PID of the orbit task is the current task's PID
@@ -185,7 +189,7 @@ SYSCALL_DEFINE4(orbit_create, const char __user *, name, void __user *, argbuf,
 	pid = get_task_pid(p, PIDTYPE_PID);
 	info->gobid = pid_vnr(pid);
 	// set the orbit id to the main program's last id + 1
-	info->lobid = ++p->last_obid;
+	info->lobid = ++current->last_obid;
 	printk(KERN_INFO PREFIX
 	       "created orbit task '%s' <LOID %d, GOID %d> for main program <PID %d>\n",
 	       info->name, info->lobid, info->gobid, info->mpid);
@@ -217,8 +221,11 @@ struct orbit_info *orbit_create_info(const char __user *name,
 	info->current_task = info->next_task = NULL;
 	info->argbuf = argbuf;
 	info->taskid_counter = 0; /* valid taskid starts from 1 */
-	error = strncpy_from_user(info->name, name, ORBIT_NAME_LEN);
-	if (error <= 0) {
+	if (name) {
+		error = strncpy_from_user(info->name, name, ORBIT_NAME_LEN);
+		if (error <= 0)
+			strcpy(info->name, "anonymous");
+	} else {
 		strcpy(info->name, "anonymous");
 	}
 
@@ -228,6 +235,32 @@ struct orbit_info *orbit_create_info(const char __user *name,
 static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	unsigned long addr);
 
+/* Find the orbit in the current process' orbit list with the specified gobid.
+ *
+ * Returns the orbit_info. If argument orbit is not null, the associated 
+ * task_struct for the orbit is stored. */
+struct orbit_info *find_orbit_by_gobid(obid_t gobid,
+				       struct task_struct **orbit)
+{
+	struct task_struct *ob, *parent;
+	struct orbit_info *info;
+
+	info = NULL;
+	parent = current->group_leader;
+	read_lock(&tasklist_lock);
+	list_for_each_entry(ob, &parent->orbit_children, orbit_sibling) {
+		if (ob->orbit_info != NULL && ob->orbit_info->gobid == gobid) {
+			info = ob->orbit_info;
+			break;
+		}
+	}
+	read_unlock(&tasklist_lock);
+	if (info && orbit)
+		*orbit = ob;
+	return info;
+}
+
+
 /* FIXME: Currently we send a task to the orbit, and let the orbit child to
  * create a snapshot actively. When should the snapshot timepoint happen?
  * Should it be right after the orbit call? If so, we may need to wait for the
@@ -236,7 +269,7 @@ static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 /* Return value: In sync mode, this call returns the checker's return value.
  * In async mode, this returns a taskid integer. */
 internalreturn orbit_call_internal(
-	unsigned long flags, unsigned long obid,
+	unsigned long flags, obid_t gobid,
 	size_t npool, struct pool_range __user * pools,
 	void __user * arg, size_t argsize)
 {
@@ -251,12 +284,13 @@ internalreturn orbit_call_internal(
 	if (argsize >= ARG_SIZE_MAX)
 		return -EINVAL;
 
-	/* 1. Find the orbit context by obid, currently we only support one
-	 * orbit entity per process, thus we will ignore the obid. */
-	parent = current->group_leader;
-	ob = parent->orbit_child;
-	info = ob->orbit_info;
-
+	/* 1. Find orbit_info by obid from the parent's orbit_children list. */
+	info = find_orbit_by_gobid(gobid, &ob);
+	if (info == NULL) {
+		printk(KERN_WARNING PREFIX "cannot find orbit %d\n", gobid);
+		return -EINVAL;
+	}
+	printk("adding to orbit %d's task queue\n", gobid);
 	/* 2. Create a orbit task struct and add to the orbit's task queue. */
 	new_task = orbit_create_task(flags, arg, argsize, npool, pools);
 	if (new_task == NULL)
@@ -264,6 +298,7 @@ internalreturn orbit_call_internal(
 
 	printd("arg = %p, new_task->arg = %p\n", arg, new_task->arg);
 
+	parent = current->group_leader;
 	/* Serialized marking protected parent mmap_sem.
 	 * We do not allow parallel snapshotting in current design. */
 	/* if (down_write_killable(&parent->mm->mmap_sem)) { */
@@ -344,13 +379,13 @@ internalreturn orbit_call_internal(
 }
 
 SYSCALL_DEFINE6(orbit_call, unsigned long, flags,
-		unsigned long, obid,
+		obid_t, gobid,
 		size_t, npool,
 		struct pool_range __user *, pools,
 		void __user *, arg,
 		size_t, argsize)
 {
-	return orbit_call_internal(flags, obid, npool, pools, arg, argsize);
+	return orbit_call_internal(flags, gobid, npool, pools, arg, argsize);
 }
 
 #define ORBIT_BUFFER_MAX 4096	/* Maximum buffer size of orbit_update data field */
@@ -429,16 +464,20 @@ SYSCALL_DEFINE1(orbit_send, const struct orbit_update_user __user *, update)
 }
 
 /* Return value: 0 for success, other value for failure */
-internalreturn orbit_recv_internal(unsigned long obid,
-	unsigned long taskid, struct orbit_update_user __user *update_user)
+internalreturn orbit_recv_internal(obid_t gobid, unsigned long taskid,
+				   struct orbit_update_user __user *update_user)
 {
-	/* TODO: allow multiple orbit */
-	/* TODO: check pointer validity */
-	struct orbit_info *info = current->group_leader->orbit_child->orbit_info;
+	struct orbit_info *info;
 	struct orbit_task *task;
 	struct orbit_update *update;
 	struct list_head *iter;
 	int found = 0;
+
+	info = find_orbit_by_gobid(gobid, NULL);
+	if (info == NULL) {
+		printk(KERN_WARNING PREFIX "cannot find orbit %d\n", gobid);
+		return -EINVAL;
+	}
 
 	/* TODO: maybe use rbtree along with the list? */
 	mutex_lock(&info->task_lock);
@@ -493,11 +532,11 @@ internalreturn orbit_recv_internal(unsigned long obid,
 	return 0;
 }
 
-SYSCALL_DEFINE3(orbit_recv, unsigned long, obid,
+SYSCALL_DEFINE3(orbit_recv, obid_t, gobid,
 		unsigned long, taskid,
 		struct orbit_update_user __user *, update_user)
 {
-	return orbit_recv_internal(obid, taskid, update_user);
+	return orbit_recv_internal(gobid, taskid, update_user);
 }
 
 /* This function has two halves:

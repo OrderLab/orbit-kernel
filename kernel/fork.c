@@ -1923,6 +1923,8 @@ static __latent_entropy struct task_struct *copy_process(
 	p->is_orbit = 0;
 	p->orbit_info = NULL;
 	p->last_obid = 0; // orbit id start from 1
+	INIT_LIST_HEAD(&p->orbit_children);
+	INIT_LIST_HEAD(&p->orbit_sibling);
 
 	rcu_copy_process(p);
 	p->vfork_done = NULL;
@@ -2559,12 +2561,6 @@ struct task_struct *fork_to_orbit(const char __user *name, void __user *argbuf)
 	task->orbit_info = orbit_create_info(name, argbuf);
 	if (task->orbit_info == NULL) {
 		printk("failed to allocate orbit info\n");
-		goto bad_orbit_setup;
-	}
-	INIT_LIST_HEAD(&task->orbit_children);
-	INIT_LIST_HEAD(&task->orbit_sibling);
-	if (current->group_leader->orbit_child != NULL) {
-		printk("Unimplemented: currently only support one orbit instance.");
 		goto bad_orbit_setup;
 	}
 	current->group_leader->orbit_child = task;
