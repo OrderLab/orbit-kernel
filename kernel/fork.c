@@ -2095,7 +2095,8 @@ static __latent_entropy struct task_struct *copy_process(
 		}
 
 		/* We do not store orbit info in the parent. */
-		p->orbit_info = orbit_create_info(args->orbit_argbuf);
+		p->orbit_info = orbit_create_info(args->orbit_argbuf,
+						args->orbit_funcptr);
 		if (p->orbit_info == NULL)
 			goto bad_fork_put_pidfd;
 		/* If any error happens after here, goto bad_orbit_creation */
@@ -2571,7 +2572,8 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 }
 #endif
 
-SYSCALL_DEFINE1(orbit_create, void __user *, orbit_argbuf)
+SYSCALL_DEFINE2(orbit_create, void __user *, orbit_argbuf,
+	orbit_entry __user *, funcptr)
 {
 	const u64 clone_flags = (/*CLONE_VM */CLONE_FS | /*| CLONE_FILES |*/ CLONE_SYSVSEM
 				/* | CLONE_SIGHAND | CLONE_THREAD */
@@ -2584,6 +2586,7 @@ SYSCALL_DEFINE1(orbit_create, void __user *, orbit_argbuf)
 		.flags		= clone_flags,
 		.exit_signal	= -1,
 		.orbit_argbuf	= orbit_argbuf,
+		.orbit_funcptr	= funcptr,
 	};
 
 	long ret = _do_fork(&args);

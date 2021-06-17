@@ -29,8 +29,6 @@
 	#define internalreturn static long /* __attribute__((always_inline)) */
 #endif
 
-typedef void*(*orbit_entry)(void*);
-
 /* Orbit flags */
 #define ORBIT_ASYNC		1	/* Whether the call is async */
 #define ORBIT_NORETVAL		2	/* Whether we want the return value.
@@ -43,6 +41,16 @@ struct pool_range {
 	unsigned long start;
 	unsigned long end;
 	bool cow;
+};
+
+struct orbit_call_args {
+	unsigned long flags;
+	unsigned long obid;
+	size_t npool;
+	struct pool_range __user *pools;
+	orbit_entry func;
+	void __user *arg;
+	size_t argsize;
 };
 
 /* Duplicated struct definition, should be eventually moved to mm.h */
@@ -72,6 +80,7 @@ struct orbit_task {
 	/* In non-async mode, orbit_call will wait on this semaphore. */
 	struct semaphore	finish;
 
+	orbit_entry		func;
 	void __user		*arg;
 	size_t			argsize;
 	unsigned long		retval;
@@ -92,6 +101,7 @@ struct orbit_task {
 
 struct orbit_info {
 	void __user		*argbuf;
+	orbit_entry __user	*funcptr;
 
 	struct semaphore	sem;
 	struct mutex		task_lock;
@@ -107,7 +117,7 @@ struct orbit_info {
 } __randomize_layout;
 
 static struct orbit_task *orbit_create_task(
-	unsigned long flags, void __user *arg, size_t argsize,
+	unsigned long flags, orbit_entry func, void __user *arg, size_t argsize,
 	size_t npool, struct pool_range __user * pools)
 {
 	struct orbit_task *new_task;
@@ -127,6 +137,7 @@ static struct orbit_task *orbit_create_task(
 	//else
 		sema_init(&new_task->finish, 0);
 	new_task->retval = 0;
+	new_task->func = func;
 	new_task->arg = arg;
 	new_task->argsize = argsize;
 	new_task->taskid = 0;	/* taskid will be allocated later */
@@ -151,7 +162,8 @@ static struct orbit_task *orbit_create_task(
 	return new_task;
 }
 
-struct orbit_info *orbit_create_info(void __user *argbuf)
+struct orbit_info *orbit_create_info(void __user *argbuf,
+	orbit_entry __user *funcptr)
 {
 	struct orbit_info *info;
 
@@ -164,6 +176,7 @@ struct orbit_info *orbit_create_info(void __user *argbuf)
 	mutex_init(&info->task_lock);
 	info->current_task = info->next_task = NULL;
 	info->argbuf = argbuf;
+	info->funcptr = funcptr;
 	info->taskid_counter = 0;	/* valid taskid starts from 1 */
 
 	return info;
@@ -182,7 +195,7 @@ static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 internalreturn orbit_call_internal(
 	unsigned long flags, unsigned long obid,
 	size_t npool, struct pool_range __user * pools,
-	void __user * arg, size_t argsize)
+	orbit_entry func, void __user * arg, size_t argsize)
 {
 	struct task_struct *ob, *parent;
 	struct vm_area_struct *ob_vma, *parent_vma;
@@ -202,7 +215,7 @@ internalreturn orbit_call_internal(
 	info = ob->orbit_info;
 
 	/* 2. Create a orbit task struct and add to the orbit's task queue. */
-	new_task = orbit_create_task(flags, arg, argsize, npool, pools);
+	new_task = orbit_create_task(flags, func, arg, argsize, npool, pools);
 	if (new_task == NULL)
 		return -ENOMEM;
 
@@ -287,14 +300,15 @@ internalreturn orbit_call_internal(
 	return ret;
 }
 
-SYSCALL_DEFINE6(orbit_call, unsigned long, flags,
-		unsigned long, obid,
-		size_t, npool,
-		struct pool_range __user *, pools,
-		void __user *, arg,
-		size_t, argsize)
+SYSCALL_DEFINE1(orbit_call, struct orbit_call_args __user *, uargs)
 {
-	return orbit_call_internal(flags, obid, npool, pools, arg, argsize);
+	struct orbit_call_args args;
+
+	/* TODO: check copy_from_user return value */
+	copy_from_user(&args, uargs, sizeof(struct orbit_call_args));
+
+	return orbit_call_internal(args.flags, args.obid,
+		args.npool, args.pools, args.func, args.arg, args.argsize);
 }
 
 #define ORBIT_BUFFER_MAX 4096	/* Maximum buffer size of orbit_update data field */
@@ -597,9 +611,11 @@ internalreturn orbit_return_internal(unsigned long retval)
 	 * the argbuf upon orbit_return.
 	 */
 	printd("task->arg = %p, info->argbuf = %p\n", task->arg, info->argbuf);
+	printd("task->func = %p, info->funcptr = %p\n", task->func, info->funcptr);
 	/* TODO: check error of copy_to_user */
 	if (task->argsize)
 		copy_to_user(info->argbuf, task->pools + task->npool, task->argsize);
+	copy_to_user(info->funcptr, &task->func, sizeof(orbit_entry));
 
 	/* 4. Return to userspace to start checker code */
 	return task->taskid;
