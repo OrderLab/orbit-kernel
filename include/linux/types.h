@@ -27,6 +27,9 @@ typedef __kernel_timer_t	timer_t;
 typedef __kernel_clockid_t	clockid_t;
 typedef __kernel_mqd_t		mqd_t;
 
+/* Obi-wan changes */
+typedef __kernel_pid_t obid_t;
+
 typedef _Bool			bool;
 
 typedef __kernel_uid32_t	uid_t;
