@@ -339,6 +339,8 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 				ret = -ENOMEM;
 				pr_err(PREFIX "OOM in orbit pool alloc %ld\n",
 				       pool_size);
+				// up semaphore before cleanup
+				up_read(&parent->mm->mmap_sem);
 				goto bad_orbit_call_cleanup;
 			}
 			up_read(&parent->mm->mmap_sem);
