@@ -20,7 +20,7 @@
 #define PREFIX "orbit: "
 
 // change to #define for enabling more debug info just for this module
-#define DEBUG_ORBIT
+#undef DEBUG_ORBIT
 
 #ifdef DEBUG_ORBIT
 #define orb_dbg(fmt, ...)                                                      \
@@ -296,7 +296,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 	/* 1. Find orbit_info by obid from the parent's orbit_children list. */
 	info = find_orbit_by_gobid(gobid, &ob);
 	if (info == NULL) {
-		printk(KERN_WARNING PREFIX "cannot find orbit %d\n", gobid);
+		pr_err(PREFIX "cannot find orbit %d\n", gobid);
 		return -EINVAL;
 	}
 	printk(KERN_DEBUG PREFIX "adding to orbit %d's task queue\n", gobid);
@@ -314,7 +314,8 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 	/* if (down_write_killable(&parent->mm->mmap_sem)) { */
 	if (down_read_killable(&parent->mm->mmap_sem)) {
 		ret = -EINTR;
-		panic("orbit call cannot acquire parent sem");
+		pr_err(PREFIX "orbit call cannot acquire parent sem");
+		goto bad_orbit_call_cleanup;
 	}
 
 	for (i = 0; i < npool; ++i) {
@@ -335,16 +336,19 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 			if (pool->data) {
 				orb_dbg("Orbit allocated %ld\n", pool_size);
 			} else {
-				printk("Orbit OOM %ld\n", pool_size);
-				panic("Orbit OOM");
+				ret = -ENOMEM;
+				pr_err(PREFIX "OOM in orbit pool alloc %ld\n",
+				       pool_size);
+				goto bad_orbit_call_cleanup;
 			}
 			up_read(&parent->mm->mmap_sem);
 			if (copy_from_user(pool->data,
 					   (const void __user *)pool->start,
 					   pool_size)) {
+				ret = -EINVAL;
 				pr_err(PREFIX
 				       "failed to copy pool data from user\n");
-				goto orbit_call_pool_data_cleanup;
+				goto bad_orbit_call_cleanup;
 			}
 			orb_dbg("copied\n");
 			if (down_read_killable(&parent->mm->mmap_sem))
@@ -389,16 +393,16 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 
 	/* free_task: */
 	kfree(new_task);
-
 	return ret;
 
-orbit_call_pool_data_cleanup:
+bad_orbit_call_cleanup:
 	for (i = 0; i < npool; ++i) {
 		struct pool_snapshot *pool = new_task->pools + i;
 		if (!pool->cow && pool->data)
 			vfree(pool->data);
 	}
-	return -EINVAL;
+	kfree(new_task);
+	return ret;
 }
 
 SYSCALL_DEFINE6(orbit_call, unsigned long, flags, obid_t, gobid, size_t, npool,
@@ -676,7 +680,8 @@ internalreturn orbit_return_internal(unsigned long retval)
 		/* TODO: Update orbit vma list */
 		/* Copy page range */
 #ifdef DEBUG_ORBIT
-		panic("orbit cannot use parent_vma in debug mode");
+		pr_err(PREFIX "orbit cannot use parent_vma in debug mode");
+		return -EINVAL;
 		/* copy_page_range(ob->mm, parent->mm, parent_vma); */
 #else
 		/* FIXME: snapshot_share does not work with implicit vma_share */
