@@ -2549,15 +2549,20 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 struct task_struct *fork_to_orbit(const char __user *name, void __user *argbuf)
 {
 	struct kernel_clone_args args = {
-		.flags = CLONE_FS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID |
-			 CLONE_ORBIT,
-		.exit_signal = -1,
+		.flags = CLONE_FS | CLONE_ORBIT,
+		.exit_signal = 0,
 	};
 
 	struct task_struct *task;
+	struct pid *pid, *tgid;
+
 	task = copy_process(NULL, 0, NUMA_NO_NODE, &args);
 	if (IS_ERR(task))
 		return task;
+	pid = task_pid(task);
+	tgid = task_tgid(task);
+	pr_info("created orbit pid (%d, %p) tgid (%d, %p)\n", task->pid, pid,
+		task->tgid, tgid);
 	task->orbit_info = orbit_create_info(name, argbuf);
 	if (task->orbit_info == NULL) {
 		printk("failed to allocate orbit info\n");
