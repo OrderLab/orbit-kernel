@@ -461,6 +461,8 @@ SYSCALL_DEFINE0(orbit_destroy_all)
 	write_lock(&orbitlist_lock);
 	list_for_each_safe(pos, q, &parent->orbit_children) {
 		ob = list_entry(pos, struct task_struct, orbit_sibling);
+		list_del(pos);
+		pr_info(PREFIX "removed orbit from the main's orbit_children\n");
 		if (ob->orbit_info != NULL) {
 			info = ob->orbit_info;
 			do_send_sig_info(SIGKILL, SEND_SIG_PRIV, ob,
@@ -469,7 +471,6 @@ SYSCALL_DEFINE0(orbit_destroy_all)
 				"terminated orbit %d of the main program %d\n",
 				info->lobid, info->mpid);
 		}
-		list_del(pos);
 	}
 	write_unlock(&orbitlist_lock);
 	return 0;
