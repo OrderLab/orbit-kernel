@@ -1972,9 +1972,11 @@ bool do_notify_parent(struct task_struct *tsk, int sig)
 
 	psig = tsk->parent->sighand;
 	spin_lock_irqsave(&psig->siglock, flags);
-	if (!tsk->ptrace && sig == SIGCHLD &&
+	/* Obi-wan changes */
+	// If the killed task is orbit, it should be self-reaped
+	if (tsk->is_orbit || (!tsk->ptrace && sig == SIGCHLD &&
 	    (psig->action[SIGCHLD-1].sa.sa_handler == SIG_IGN ||
-	     (psig->action[SIGCHLD-1].sa.sa_flags & SA_NOCLDWAIT))) {
+	     (psig->action[SIGCHLD-1].sa.sa_flags & SA_NOCLDWAIT)))) {
 		/*
 		 * We are exiting and our parent doesn't care.  POSIX.1
 		 * defines special semantics for setting SIGCHLD to SIG_IGN
@@ -1994,6 +1996,7 @@ bool do_notify_parent(struct task_struct *tsk, int sig)
 		if (psig->action[SIGCHLD-1].sa.sa_handler == SIG_IGN)
 			sig = 0;
 	}
+
 	/*
 	 * Send with __send_signal as si_pid and si_uid are in the
 	 * parent's namespaces.

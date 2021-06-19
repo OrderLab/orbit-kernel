@@ -3,6 +3,7 @@
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
+#include <linux/oom.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
@@ -16,6 +17,8 @@
 #include <linux/mempolicy.h>
 #include <linux/rmap.h>
 #include <linux/userfaultfd_k.h>
+#include <linux/signal.h>
+#include <linux/rwlock_types.h>
 
 #define PREFIX "orbit: "
 
@@ -55,6 +58,8 @@ struct pool_range {
 	unsigned long end;
 	bool cow;
 };
+
+__cacheline_aligned DEFINE_RWLOCK(orbitlist_lock);
 
 /* Duplicated struct definition, should be eventually moved to mm.h */
 struct vma_snapshot {
@@ -192,7 +197,9 @@ SYSCALL_DEFINE4(orbit_create, const char __user *, name, void __user *, argbuf,
 
 	// add the newly created orbit task_struct to the parent's orbit
 	// children list.
+	write_lock(&orbitlist_lock);
 	list_add_tail(&p->orbit_sibling, &current->orbit_children);
+	write_unlock(&orbitlist_lock);
 
 	/* setup other fields of orbit_info */
 	// the main PID of the orbit task is the current task's PID
@@ -248,6 +255,10 @@ static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 
 /* Find the orbit in the current process' orbit list with the specified gobid.
  *
+ * In the event that the main program has restarted while the orbit is not,
+ * the orbit may not appear in the current process' list any more. We need
+ * to search the global task list and fix this.
+ *
  * Returns the orbit_info. If argument orbit is not null, the associated 
  * task_struct for the orbit is stored. */
 struct orbit_info *find_orbit_by_gobid(obid_t gobid, struct task_struct **orbit)
@@ -257,14 +268,16 @@ struct orbit_info *find_orbit_by_gobid(obid_t gobid, struct task_struct **orbit)
 
 	info = NULL;
 	parent = current->group_leader;
-	read_lock(&tasklist_lock);
+	read_lock(&orbitlist_lock);
 	list_for_each_entry (ob, &parent->orbit_children, orbit_sibling) {
 		if (ob->orbit_info != NULL && ob->orbit_info->gobid == gobid) {
 			info = ob->orbit_info;
 			break;
 		}
 	}
-	read_unlock(&tasklist_lock);
+	read_unlock(&orbitlist_lock);
+	// TODO: when the gobid is not in the current's list, we should fall
+	// back to the global task list.
 	if (info && orbit)
 		*orbit = ob;
 	return info;
@@ -412,6 +425,55 @@ SYSCALL_DEFINE6(orbit_call, unsigned long, flags, obid_t, gobid, size_t, npool,
 		argsize)
 {
 	return orbit_call_internal(flags, gobid, npool, pools, arg, argsize);
+}
+
+SYSCALL_DEFINE1(orbit_destroy, obid_t, gobid)
+{
+	struct orbit_info *info;
+	struct task_struct *ob;
+	struct pid *pid, *tgid;
+
+	info = find_orbit_by_gobid(gobid, &ob);
+	if (info == NULL)
+		return -EINVAL;
+	pid = task_pid(ob);
+	tgid = task_tgid(ob);
+	pr_info(PREFIX "to kill orbit pid (%d, %p) tgid (%d, %p)\n", ob->pid,
+		pid, ob->tgid, tgid);
+	write_lock(&orbitlist_lock);
+	list_del(&ob->orbit_sibling);
+	pr_info(PREFIX "removed orbit from the main's orbit_children\n");
+	write_unlock(&orbitlist_lock);
+	do_send_sig_info(SIGKILL, SEND_SIG_PRIV, ob, PIDTYPE_TGID);
+	pr_info(PREFIX "terminated orbit %d of the main program %d\n",
+		info->lobid, info->mpid);
+	return 0;
+}
+
+SYSCALL_DEFINE0(orbit_destroy_all)
+{
+	struct list_head *pos, *q;
+	struct task_struct *ob, *parent;
+	struct orbit_info *info;
+
+	info = NULL;
+	parent = current->group_leader;
+	write_lock(&orbitlist_lock);
+	list_for_each_safe(pos, q, &parent->orbit_children) {
+		ob = list_entry(pos, struct task_struct, orbit_sibling);
+		list_del(pos);
+		pr_info(PREFIX "removed orbit from the main's orbit_children\n");
+		if (ob->orbit_info != NULL) {
+			info = ob->orbit_info;
+			do_send_sig_info(SIGKILL, SEND_SIG_PRIV, ob,
+					 PIDTYPE_TGID);
+			pr_info(PREFIX
+				"terminated orbit %d of the main program %d\n",
+				info->lobid, info->mpid);
+		}
+	}
+	write_unlock(&orbitlist_lock);
+	return 0;
 }
 
 #define ORBIT_BUFFER_MAX                                                       \
