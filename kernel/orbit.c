@@ -1,6 +1,9 @@
 #include <linux/orbit.h>
+#include <linux/types.h>
+#include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
+#include <linux/oom.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
@@ -14,27 +17,40 @@
 #include <linux/mempolicy.h>
 #include <linux/rmap.h>
 #include <linux/userfaultfd_k.h>
+#include <linux/signal.h>
+#include <linux/rwlock_types.h>
+#include <linux/jiffies.h>
 
-#define DBG 0
+#define PREFIX "orbit: "
 
-/* CAUTION: This naive printd MUST NOT be used before any immediate `else'.
- * Add explicit brackets when using printd in an `if' statement. */
-#define printd if(DBG)printk
+// change to #define for enabling more debug info just for this module
+#undef DEBUG_ORBIT
+#undef DEBUG_COPY_MEMCPY
 
-#define whatis(x) printd(#x " is %lu\n", x)
-
-#if DBG == 1
-	#define internalreturn long __attribute__((optimize("O0")))
+#ifdef DEBUG_ORBIT
+#define orb_dbg(fmt, ...)                                                      \
+	do {                                                                   \
+		printk(KERN_DEBUG PREFIX fmt, ##__VA_ARGS__);                  \
+	} while (0)
 #else
-	#define internalreturn static long /* __attribute__((always_inline)) */
+#define orb_dbg(fmt, ...)                                                      \
+	do {                                                                   \
+	} while (0)
 #endif
 
+#define whatis(x) orb_dbg(#x " is %lu\n", x)
+
+#define internalreturn static long /* __attribute__((always_inline)) */
+
 /* Orbit flags */
-#define ORBIT_ASYNC		1	/* Whether the call is async */
-#define ORBIT_NORETVAL		2	/* Whether we want the return value.
-					 * This option is ignored in async. */
+#define ORBIT_ASYNC 1 /* Whether the call is async */
+#define ORBIT_NORETVAL 2 /* Whether we want the return value.
+			    This option is ignored in async. */
 
 #define ARG_SIZE_MAX 1024
+
+/* Orbit name max length */
+#define ORBIT_NAME_LEN 24
 
 enum orbit_pool_mode { ORBIT_COW, ORBIT_MOVE, ORBIT_COPY, };
 
@@ -47,7 +63,7 @@ struct pool_range {
 
 struct orbit_call_args {
 	unsigned long flags;
-	unsigned long obid;
+	obid_t gobid;
 	size_t npool;
 	struct pool_range __user *pools;
 	orbit_entry func;
@@ -55,10 +71,12 @@ struct orbit_call_args {
 	size_t argsize;
 };
 
+__cacheline_aligned DEFINE_RWLOCK(orbitlist_lock);
+
 /* Duplicated struct definition, should be eventually moved to mm.h */
 struct vma_snapshot {
 	size_t count;
-	size_t head, tail;	/* Cursor in the first and last snap_block */
+	size_t head, tail; /* Cursor in the first and last snap_block */
 	struct list_head list;
 };
 
@@ -73,60 +91,69 @@ struct pool_snapshot {
 };
 
 struct orbit_task {
-	unsigned long		taskid;		/* valid taskid starts from 1 */
-	unsigned long		flags;
-	struct list_head	elem;
+	unsigned long taskid; /* valid taskid starts from 1 */
+	unsigned long flags;
+	struct list_head elem;
 	/* ARC. Value should be list_size(updates).
 	 * This is currently only used in ORBIT_ASYNC mode. */
-	refcount_t		refcount;
+	refcount_t refcount;
 	/* In non-async mode, orbit_call will wait on this semaphore. */
-	struct semaphore	finish;
+	struct semaphore finish;
 
-	orbit_entry		func;
-	void __user		*arg;
-	size_t			argsize;
-	unsigned long		retval;
+	orbit_entry func;
+	void __user *arg;
+	size_t argsize;
+	unsigned long retval;
 
-	struct mutex		updates_lock;	/* lock for update list */
-	struct semaphore	updates_sem;
+	struct mutex updates_lock; /* lock for update list */
+	struct semaphore updates_sem;
 	/* List of updates to be applied
 	 * FIXME: Currently this is shared between update and update_v */
-	struct list_head	updates;
+	struct list_head updates;
 
 	/* Memory ranges snapshotted. Variable-sized struct. */
-	size_t			npool;
-	struct pool_snapshot	pools[];
+	size_t npool;
+	struct pool_snapshot pools[];
 
 	/* Extra field: char arg_data[] starting at (char*)(pools + npool),
 	 * see orbit_create_task. */
-} __randomize_layout;
+};
 
 struct orbit_info {
-	void __user		*argbuf;
-	orbit_entry __user	*funcptr;
+	void __user *argbuf;
+	orbit_entry __user *funcptr;
 
-	struct semaphore	sem;
-	struct mutex		task_lock;
-	struct list_head	task_list;	/* orbit_task queue */
+	struct semaphore sem;
+	struct semaphore exit_sem;
+	struct mutex task_lock;
+	struct list_head task_list; /* orbit_task queue */
 	/* TODO: use lockfree list for tasks and atomic for counter */
-	unsigned long		taskid_counter;
+	unsigned long taskid_counter;
 	/* FIXME: This is a hack to get current running task. Ideally we should
 	 * support multiple checker tasks at the same time. */
-	struct orbit_task	*current_task;
+	struct orbit_task *current_task;
 	/* Pointer to the next task. NULL when queue is empty. This field will
 	 * be updated when inserting or popping a task into/from the queue. */
-	struct orbit_task	*next_task;
-} __randomize_layout;
+	struct orbit_task *next_task;
 
-static struct orbit_task *orbit_create_task(
-	unsigned long flags, orbit_entry func, void __user *arg, size_t argsize,
-	size_t npool, struct pool_range __user * pools)
+	pid_t mpid; /* PID of the attached main program */
+	pid_t gobid; /* PID of this orbit task, globally unique */
+	obid_t lobid; /* Orbit id, starting from 1. It is locally unique
+                     to the main program.*/
+	char name[ORBIT_NAME_LEN]; /* Name of orbit */
+};
+
+static struct orbit_task *orbit_create_task(unsigned long flags, orbit_entry func,
+					    void __user *arg, size_t argsize,
+					    size_t npool,
+					    struct pool_range __user *pools)
 {
 	struct orbit_task *new_task;
 	size_t i;
 
 	new_task = kmalloc(sizeof(*new_task) + argsize +
-			npool * sizeof(struct pool_snapshot), GFP_KERNEL);
+				   npool * sizeof(struct pool_snapshot),
+			   GFP_KERNEL);
 	if (new_task == NULL)
 		return NULL;
 
@@ -135,14 +162,14 @@ static struct orbit_task *orbit_create_task(
 	sema_init(&new_task->updates_sem, 0);
 	mutex_init(&new_task->updates_lock);
 	//if (flags & ORBIT_ASYNC)
-		refcount_set(&new_task->refcount, 0);
+	refcount_set(&new_task->refcount, 0);
 	//else
-		sema_init(&new_task->finish, 0);
+	sema_init(&new_task->finish, 0);
 	new_task->retval = 0;
 	new_task->func = func;
 	new_task->arg = arg;
 	new_task->argsize = argsize;
-	new_task->taskid = 0;	/* taskid will be allocated later */
+	new_task->taskid = 0; /* taskid will be allocated later */
 	new_task->flags = flags;
 
 	new_task->npool = npool;
@@ -157,17 +184,67 @@ static struct orbit_task *orbit_create_task(
 		new_task->pools[i].data = NULL;
 	}
 
-	/* TODO: check error of copy_from_user */
-	if (argsize)
-		copy_from_user(new_task->pools + npool, arg, argsize);
+	// FIXME: npool can be 0 when argsize is > 0
+	if (argsize) {
+		if (copy_from_user(new_task->pools + npool, arg, argsize)) {
+			pr_err(PREFIX "failed to copy args for orbit task\n");
+			return NULL;
+		}
+	}
 
 	return new_task;
 }
 
-struct orbit_info *orbit_create_info(void __user *argbuf,
-	orbit_entry __user *funcptr)
+SYSCALL_DEFINE5(orbit_create, const char __user *, name, void __user *, argbuf,
+		pid_t __user *, mpid, obid_t __user *, lobid,
+		orbit_entry __user *, funcptr)
+{
+	struct task_struct *p;
+	struct orbit_info *info;
+	struct pid *pid;
+
+	p = fork_to_orbit(name, argbuf, funcptr);
+	if (IS_ERR(p))
+		return PTR_ERR(p);
+	info = p->orbit_info;
+	if (info == NULL) {
+		printk(KERN_ERR PREFIX "orbit_info is unexpectedly NULL\n");
+		return -EINVAL;
+	}
+
+	// add the newly created orbit task_struct to the parent's orbit
+	// children list.
+	write_lock(&orbitlist_lock);
+	list_add_tail(&p->orbit_sibling, &current->orbit_children);
+	write_unlock(&orbitlist_lock);
+
+	/* setup other fields of orbit_info */
+	// the main PID of the orbit task is the current task's PID
+	info->mpid = task_pid_nr(current);
+	pid = get_task_pid(p, PIDTYPE_PID);
+	info->gobid = pid_vnr(pid);
+	// set the orbit id to the main program's last id + 1
+	info->lobid = ++current->last_obid;
+	printk(KERN_INFO PREFIX
+	       "created orbit task '%s' <LOID %d, GOID %d> for main program <PID %d>\n",
+	       info->name, info->lobid, info->gobid, info->mpid);
+	// if user pointers are not null, save the orbit ids
+	if (lobid != NULL)
+		put_user(info->lobid, lobid);
+	if (mpid != NULL)
+		put_user(info->mpid, mpid);
+
+	// waking up the orbit task before we return
+	wake_up_new_task(p);
+	put_pid(pid);
+	return info->gobid;
+}
+
+struct orbit_info *orbit_create_info(const char __user *name,
+		void __user *argbuf, orbit_entry __user *funcptr)
 {
 	struct orbit_info *info;
+	int error;
 
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
 	if (info == NULL)
@@ -175,17 +252,63 @@ struct orbit_info *orbit_create_info(void __user *argbuf,
 
 	INIT_LIST_HEAD(&info->task_list);
 	sema_init(&info->sem, 0);
+	sema_init(&info->exit_sem, 0);
 	mutex_init(&info->task_lock);
 	info->current_task = info->next_task = NULL;
 	info->argbuf = argbuf;
 	info->funcptr = funcptr;
-	info->taskid_counter = 0;	/* valid taskid starts from 1 */
+	info->taskid_counter = 0; /* valid taskid starts from 1 */
+	if (name) {
+		error = strncpy_from_user(info->name, name, ORBIT_NAME_LEN);
+		if (error <= 0)
+			strcpy(info->name, "anonymous");
+	} else {
+		strcpy(info->name, "anonymous");
+	}
 
 	return info;
 }
 
+bool signal_orbit_exit(struct task_struct *ob)
+{
+	if (!(ob && ob->is_orbit && ob->orbit_info))
+		return false;
+	up(&ob->orbit_info->exit_sem);
+	return true;
+}
+
 static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
-	unsigned long addr);
+			  unsigned long addr);
+
+/* Find the orbit in the current process' orbit list with the specified gobid.
+ *
+ * In the event that the main program has restarted while the orbit is not,
+ * the orbit may not appear in the current process' list any more. We need
+ * to search the global task list and fix this.
+ *
+ * Returns the orbit_info. If argument orbit is not null, the associated 
+ * task_struct for the orbit is stored. */
+struct orbit_info *find_orbit_by_gobid(obid_t gobid, struct task_struct **orbit)
+{
+	struct task_struct *ob, *parent;
+	struct orbit_info *info;
+
+	info = NULL;
+	parent = current->group_leader;
+	read_lock(&orbitlist_lock);
+	list_for_each_entry (ob, &parent->orbit_children, orbit_sibling) {
+		if (ob->orbit_info != NULL && ob->orbit_info->gobid == gobid) {
+			info = ob->orbit_info;
+			break;
+		}
+	}
+	read_unlock(&orbitlist_lock);
+	// TODO: when the gobid is not in the current's list, we should fall
+	// back to the global task list.
+	if (info && orbit)
+		*orbit = ob;
+	return info;
+}
 
 /* FIXME: Currently we send a task to the orbit, and let the orbit child to
  * create a snapshot actively. When should the snapshot timepoint happen?
@@ -194,10 +317,10 @@ static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 
 /* Return value: In sync mode, this call returns the checker's return value.
  * In async mode, this returns a taskid integer. */
-internalreturn orbit_call_internal(
-	unsigned long flags, unsigned long obid,
-	size_t npool, struct pool_range __user * pools,
-	orbit_entry func, void __user * arg, size_t argsize)
+internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
+				   size_t npool,
+				   struct pool_range __user *pools,
+				   orbit_entry func, void __user *arg, size_t argsize)
 {
 	struct task_struct *ob, *parent;
 	struct vm_area_struct *ob_vma, *parent_vma;
@@ -210,25 +333,29 @@ internalreturn orbit_call_internal(
 	if (argsize >= ARG_SIZE_MAX)
 		return -EINVAL;
 
-	/* 1. Find the orbit context by obid, currently we only support one
-	 * orbit entity per process, thus we will ignore the obid. */
-	parent = current->group_leader;
-	ob = parent->orbit_child;
-	info = ob->orbit_info;
+	/* 1. Find orbit_info by obid from the parent's orbit_children list. */
+	info = find_orbit_by_gobid(gobid, &ob);
+	if (info == NULL) {
+		pr_err(PREFIX "cannot find orbit %d\n", gobid);
+		return -EINVAL;
+	}
+	printk(KERN_DEBUG PREFIX "adding to orbit %d's task queue\n", gobid);
 
 	/* 2. Create a orbit task struct and add to the orbit's task queue. */
 	new_task = orbit_create_task(flags, func, arg, argsize, npool, pools);
 	if (new_task == NULL)
 		return -ENOMEM;
 
-	printd("arg = %p, new_task->arg = %p\n", arg, new_task->arg);
+	orb_dbg("arg = %p, new_task->arg = %p\n", arg, new_task->arg);
 
+	parent = current->group_leader;
 	/* Serialized marking protected parent mmap_sem.
 	 * We do not allow parallel snapshotting in current design. */
 	/* if (down_write_killable(&parent->mm->mmap_sem)) { */
 	if (down_read_killable(&parent->mm->mmap_sem)) {
 		ret = -EINTR;
-		panic("orbit call cannot acquire parent sem");
+		pr_err(PREFIX "orbit call cannot acquire parent sem");
+		goto bad_orbit_call_cleanup;
 	}
 
 	for (i = 0; i < npool; ++i) {
@@ -236,7 +363,7 @@ internalreturn orbit_call_internal(
 
 		parent_vma = find_vma(parent->mm, pool->start);
 
-		printd("pool %ld size %ld", i, pool->end - pool->start);
+		orb_dbg("pool %ld size %ld", i, pool->end - pool->start);
 		/* TODO: kernel rules for cow */
 		/* if (pool->end - pool->start <= 8192) { */
 		if (pool->mode == ORBIT_COPY) {
@@ -247,30 +374,40 @@ internalreturn orbit_call_internal(
 			}
 			pool->data = vmalloc(pool_size);
 			if (pool->data) {
-				printd("Orbit allocated %ld\n", pool_size);
+				orb_dbg("Orbit allocated %ld\n", pool_size);
 			} else {
-				printk("Orbit OOM %ld\n", pool_size);
-				panic("Orbit OOM");
+				ret = -ENOMEM;
+				pr_err(PREFIX "OOM in orbit pool alloc %ld\n",
+				       pool_size);
+				// up semaphore before cleanup
+				up_read(&parent->mm->mmap_sem);
+				goto bad_orbit_call_cleanup;
 			}
 			up_read(&parent->mm->mmap_sem);
-			copy_from_user(pool->data, (const void __user *)pool->start,
-				pool_size);
-			printd("copied\n");
+			if (copy_from_user(pool->data,
+					   (const void __user *)pool->start,
+					   pool_size)) {
+				ret = -EINVAL;
+				pr_err(PREFIX
+				       "failed to copy pool data from user\n");
+				goto bad_orbit_call_cleanup;
+			}
+			orb_dbg("copied\n");
 			if (down_read_killable(&parent->mm->mmap_sem))
 				panic("down failed");
 		} else if (0 && list_empty(&info->task_list)) {
 			/* FIXME: we need ob lock */
 			ob_vma = find_vma(ob->mm, pool->start);
-			ret = update_page_range(ob->mm, parent->mm,
-				ob_vma, parent_vma,
-				pool->start, pool->end,
-				ORBIT_UPDATE_SNAPSHOT, NULL);
+			ret = update_page_range(ob->mm, parent->mm, ob_vma,
+						parent_vma, pool->start,
+						pool->end,
+						ORBIT_UPDATE_SNAPSHOT, NULL);
 		} else {
 			/* TODO: ORBIT_MOVE */
-			ret = update_page_range(NULL, parent->mm,
-				NULL, parent_vma,
-				pool->start, pool->end,
-				ORBIT_UPDATE_MARK, &pool->snapshot);
+			ret = update_page_range(NULL, parent->mm, NULL,
+						parent_vma, pool->start,
+						pool->end, ORBIT_UPDATE_MARK,
+						&pool->snapshot);
 		}
 	}
 
@@ -294,12 +431,20 @@ internalreturn orbit_call_internal(
 	if (flags & ORBIT_ASYNC)
 		return taskid;
 	/* or wait for the task to finish */
-	down(&new_task->finish);	/* TODO: make killable? */
+	down(&new_task->finish); /* TODO: make killable? */
 	ret = new_task->retval;
 
-/* free_task: */
+	/* free_task: */
 	kfree(new_task);
+	return ret;
 
+bad_orbit_call_cleanup:
+	for (i = 0; i < npool; ++i) {
+		struct pool_snapshot *pool = new_task->pools + i;
+		if (pool->mode != ORBIT_COPY && pool->data)
+			vfree(pool->data);
+	}
+	kfree(new_task);
 	return ret;
 }
 
@@ -310,21 +455,105 @@ SYSCALL_DEFINE1(orbit_call, struct orbit_call_args __user *, uargs)
 	/* TODO: check copy_from_user return value */
 	copy_from_user(&args, uargs, sizeof(struct orbit_call_args));
 
-	return orbit_call_internal(args.flags, args.obid,
+	return orbit_call_internal(args.flags, args.gobid,
 		args.npool, args.pools, args.func, args.arg, args.argsize);
 }
 
-#define ORBIT_BUFFER_MAX 4096	/* Maximum buffer size of orbit_update data field */
+SYSCALL_DEFINE1(orbit_destroy, obid_t, gobid)
+{
+	struct orbit_info *info;
+	struct task_struct *ob;
+	struct pid *pid, *tgid;
+	int ret;
+
+	info = find_orbit_by_gobid(gobid, &ob);
+	if (info == NULL)
+		return -EINVAL;
+	pid = task_pid(ob);
+	tgid = task_tgid(ob);
+	pr_info(PREFIX "to kill orbit pid (%d, %p) tgid (%d, %p)\n", ob->pid,
+		pid, ob->tgid, tgid);
+	write_lock(&orbitlist_lock);
+	list_del(&ob->orbit_sibling);
+	pr_info(PREFIX "removed orbit from the main's orbit_children\n");
+	write_unlock(&orbitlist_lock);
+	pr_info(PREFIX "orbit %d's state is %ld\n", ob->pid, ob->state);
+	// inc ref count of the struct so we can access it after it's killed
+	get_task_struct(ob);
+	ret = do_send_sig_info(SIGKILL, SEND_SIG_PRIV, ob, PIDTYPE_TGID);
+	pr_info(PREFIX "%s orbit %d of the main program %d\n",
+		(ret == 0) ? "terminated" : "failed to terminate",
+		info->lobid, info->mpid);
+	/*
+	 * There can be a time delay between sending the SIGKILL to the orbit
+	 * task getting the signal, notifying its parent, and reaping itself.
+	 * Thus, checking the orbit after orbit_destroy returns can still
+	 * succeed.
+	 *
+	 * Here we add an `exit_sem` field in orbit_info to try to ensure the
+	 * orbit finishes reaping itself before the 'orbit_destroy' returns.
+	 * The exit_notify function in kernel/exit.c will signal this semaphore.
+	 *
+	 * To avoid potential indefinite blocking, use down_timeout instead of
+	 * down. The msecs_to_jiffies are a bit inaccurate. Using a small value
+	 * like 5 ms can cause premature returns even though the time has not
+	 * elapsed for more than 5 ms. Use a conservative 500 ms timeout.
+	 *
+	 */
+	if (down_timeout(&ob->orbit_info->exit_sem, msecs_to_jiffies(500)))
+		pr_info(PREFIX "timeout in waiting for orbit exit signal, "
+			"orbit exit state is %d\n", ob->exit_state);
+	// dec ref count of the task struct
+	put_task_struct(ob);
+	return 0;
+}
+
+SYSCALL_DEFINE0(orbit_destroy_all)
+{
+	struct list_head *pos, *q;
+	struct task_struct *ob, *parent;
+	struct orbit_info *info;
+
+	info = NULL;
+	parent = current->group_leader;
+	write_lock(&orbitlist_lock);
+	list_for_each_safe(pos, q, &parent->orbit_children) {
+		ob = list_entry(pos, struct task_struct, orbit_sibling);
+		get_task_struct(ob);
+		list_del(pos);
+		pr_info(PREFIX "removed orbit from the main's orbit_children\n");
+		if (ob->orbit_info != NULL) {
+			info = ob->orbit_info;
+			do_send_sig_info(SIGKILL, SEND_SIG_PRIV, ob,
+					 PIDTYPE_TGID);
+			pr_info(PREFIX
+				"terminated orbit %d of the main program %d\n",
+				info->lobid, info->mpid);
+			if (down_timeout(&ob->orbit_info->exit_sem,
+					 msecs_to_jiffies(500)))
+				pr_info(PREFIX
+					"timeout in waiting for orbit exit signal, "
+					"orbit exit state is %d\n",
+					ob->exit_state);
+		}
+		put_task_struct(ob);
+	}
+	write_unlock(&orbitlist_lock);
+	return 0;
+}
+
+#define ORBIT_BUFFER_MAX                                                       \
+	4096 /* Maximum buffer size of orbit_update data field */
 
 struct orbit_update_user {
-	void __user	*ptr;
-	size_t		length;
-	char		data[];
+	void __user *ptr;
+	size_t length;
+	char data[];
 };
 
 struct orbit_update {
-	struct list_head		elem;
-	struct orbit_update_user	userdata;
+	struct list_head elem;
+	struct orbit_update_user userdata;
 };
 
 static struct orbit_update *orbit_create_update(size_t length)
@@ -340,8 +569,8 @@ static struct orbit_update *orbit_create_update(size_t length)
 }
 
 /* Return value: 0 for success, other value for failure */
-internalreturn orbit_send_internal(
-	const struct orbit_update_user __user * update)
+internalreturn
+orbit_send_internal(const struct orbit_update_user __user *update)
 {
 	struct orbit_update *new_update;
 	unsigned long length;
@@ -365,14 +594,13 @@ internalreturn orbit_send_internal(
 	if (new_update == NULL)
 		return -ENOMEM;
 
-	/* TODO: check return value of copy */
-
-#if DBG
+#ifdef DEBUG_COPY_MEMCPY
 	memcpy(&new_update->userdata, update,
-			sizeof(struct orbit_update_user) + length);
+	       sizeof(struct orbit_update_user) + length);
 #else
-	copy_from_user(&new_update->userdata, update,
-			sizeof(struct orbit_update_user) + length);
+	if (copy_from_user(&new_update->userdata, update,
+			   sizeof(struct orbit_update_user) + length))
+		return -EINVAL;
 #endif
 
 	mutex_lock(&current_task->updates_lock);
@@ -390,20 +618,24 @@ SYSCALL_DEFINE1(orbit_send, const struct orbit_update_user __user *, update)
 }
 
 /* Return value: 0 for success, other value for failure */
-internalreturn orbit_recv_internal(unsigned long obid,
-	unsigned long taskid, struct orbit_update_user __user *update_user)
+internalreturn orbit_recv_internal(obid_t gobid, unsigned long taskid,
+				   struct orbit_update_user __user *update_user)
 {
-	/* TODO: allow multiple orbit */
-	/* TODO: check pointer validity */
-	struct orbit_info *info = current->group_leader->orbit_child->orbit_info;
+	struct orbit_info *info;
 	struct orbit_task *task;
 	struct orbit_update *update;
 	struct list_head *iter;
 	int found = 0;
 
+	info = find_orbit_by_gobid(gobid, NULL);
+	if (info == NULL) {
+		printk(KERN_WARNING PREFIX "cannot find orbit %d\n", gobid);
+		return -EINVAL;
+	}
+
 	/* TODO: maybe use rbtree along with the list? */
 	mutex_lock(&info->task_lock);
-	list_for_each(iter, &info->task_list) {
+	list_for_each (iter, &info->task_list) {
 		task = list_entry(iter, struct orbit_task, elem);
 		if (task->taskid == taskid) {
 			found = 1;
@@ -427,26 +659,27 @@ internalreturn orbit_recv_internal(unsigned long obid,
 	mutex_lock(&task->updates_lock);
 	if (unlikely(list_empty(&task->updates))) {
 		mutex_unlock(&task->updates_lock);
-		return -EIDRM;	/* End of message list. */
+		return -EIDRM; /* End of message list. */
 	}
 	update = list_first_entry(&task->updates, struct orbit_update, elem);
 	list_del(&update->elem);
 	mutex_unlock(&task->updates_lock);
 
-	/* TODO: check return value of copy */
-#if DBG
+#ifdef DEBUG_COPY_MEMCPY
 	memcpy(update_user, &update->userdata,
-		sizeof(struct orbit_update_user) + update->userdata.length);
+	       sizeof(struct orbit_update_user) + update->userdata.length);
 #else
-	copy_to_user(update_user, &update->userdata,
-		sizeof(struct orbit_update_user) + update->userdata.length);
+	if (copy_to_user(update_user, &update->userdata,
+			 sizeof(struct orbit_update_user) +
+				 update->userdata.length))
+		return -EINVAL;
 #endif
 
 	kfree(update);
 
 	/* ARC free task object */
 	if (refcount_dec_and_test(&task->refcount) &&
-		down_trylock(&task->finish) == 0) {
+	    down_trylock(&task->finish) == 0) {
 		list_del(&task->elem);
 		kfree(task);
 	}
@@ -454,11 +687,10 @@ internalreturn orbit_recv_internal(unsigned long obid,
 	return 0;
 }
 
-SYSCALL_DEFINE3(orbit_recv, unsigned long, obid,
-		unsigned long, taskid,
+SYSCALL_DEFINE3(orbit_recv, obid_t, gobid, unsigned long, taskid,
 		struct orbit_update_user __user *, update_user)
 {
-	return orbit_recv_internal(obid, taskid, update_user);
+	return orbit_recv_internal(gobid, taskid, update_user);
 }
 
 /* This function has two halves:
@@ -475,16 +707,21 @@ internalreturn orbit_return_internal(unsigned long retval)
 {
 	struct task_struct *ob, *parent;
 	struct orbit_info *info;
-	struct orbit_task *task;	/* Both old and new task. */
+	struct orbit_task *task; /* Both old and new task. */
 	struct vm_area_struct *ob_vma;
 	struct pool_snapshot *pool;
 
-	if (!current->is_orbit)
+	if (!current->is_orbit) {
+		printk("calling orbit_return on a non-orbit task\n");
 		return -EINVAL;
+	}
+	if (!current->orbit_main) {
+		printk("the main process of the orbit is unknown\n");
+		return -EINVAL;
+	}
 
 	ob = current;
-	parent = ob->orbit_child;	/* Currntly orbit_child in orbit is
-					 * reused as a pointer to parent. */
+	parent = ob->orbit_main;
 	info = ob->orbit_info;
 
 	/* First half: return value to parent */
@@ -495,12 +732,13 @@ internalreturn orbit_return_internal(unsigned long retval)
 	if (task != NULL) {
 		task->retval = retval;
 
-		printd("orbit return locking\n");
+		orb_dbg("orbit return locking\n");
 		mutex_lock(&info->task_lock);
-		printd("orbit return locked\n");
+		orb_dbg("orbit return locked\n");
 
 		info->next_task = list_is_last(&task->elem, &info->task_list) ?
-					NULL : list_next_entry(task, elem);
+					  NULL :
+					  list_next_entry(task, elem);
 
 		if (task->flags & ORBIT_ASYNC) {
 			/* If the user does not want output,
@@ -510,8 +748,7 @@ internalreturn orbit_return_internal(unsigned long retval)
 			if (task->flags & ORBIT_NORETVAL) {
 				up(&task->finish);
 				if (refcount_read(&task->refcount) == 0 &&
-					down_trylock(&task->finish) == 0)
-				{
+				    down_trylock(&task->finish) == 0) {
 					list_del(&task->elem);
 					kfree(task);
 				}
@@ -526,23 +763,28 @@ internalreturn orbit_return_internal(unsigned long retval)
 		}
 
 		mutex_unlock(&info->task_lock);
-		printd("orbit return unlocked\n");
+		orb_dbg("orbit return unlocked\n");
 	}
 
 	/* Second half: handle the next task */
 
 	/* 1. Wait for a task to come in */
 	/* TODO: make killable? */
-	printd("orbit return down\n");
-	down(&info->sem);
-	printd("orbit return downed\n");
+	orb_dbg("orbit return down\n");
+	if (down_killable(&info->sem)) {
+		pr_info(PREFIX "orbit %d interrupted while waiting for tasks",
+			ob->pid);
+		return -EINTR;
+	}
+	orb_dbg("orbit return downed\n");
 	mutex_lock(&info->task_lock);
-	printd("orbit return locked 2\n");
+	orb_dbg("orbit return locked 2\n");
 	info->current_task = task = info->next_task;
 	info->next_task = list_is_last(&task->elem, &info->task_list) ?
-					NULL : list_next_entry(task, elem);
+				  NULL :
+				  list_next_entry(task, elem);
 	mutex_unlock(&info->task_lock);
-	printd("orbit return unlocked 2\n");
+	orb_dbg("orbit return unlocked 2\n");
 
 	/* if (down_write_killable(&ob->mm->mmap_sem)) { */
 	if (down_read_killable(&ob->mm->mmap_sem)) {
@@ -565,46 +807,44 @@ internalreturn orbit_return_internal(unsigned long retval)
 		whatis(pool->end);
 
 		if (!(ob_vma->vm_start <= pool->start &&
-			pool->end <= ob_vma->vm_end)) {
+		      pool->end <= ob_vma->vm_end)) {
 			/* TODO: cleanup  */
 			panic("orbit error handling unimplemented!");
 		}
 		/* TODO: Update orbit vma list */
 		/* Copy page range */
-#if DBG
-		panic("orbit cannot use parent_vma in debug mode");
-		/* copy_page_range(ob->mm, parent->mm, parent_vma); */
-#else
+
 		/* FIXME: snapshot_share does not work with implicit vma_share */
 		/* if (!(ob_vma->vm_start <= pool->start &&
 			pool->end <= ob_vma->vm_start))
 			snapshot_share(ob->mm, parent->mm, parent_vma); */
 
-		printd("orbit apply pool %ld %d %ld\n", pool - task->pools, !!pool->data, pool->snapshot.count);
-		printd("snapshot pte count is %ld\n", pool->snapshot.count);
+		orb_dbg("orbit apply pool %ld %d %ld\n", pool - task->pools,
+		       !!pool->data, pool->snapshot.count);
+		orb_dbg("snapshot pte count is %ld\n", pool->snapshot.count);
 		if (pool->data) {
-			printd("access_ok %ld\n", access_ok(pool->start, pool->end - pool->start));
+			orb_dbg("access_ok %ld\n",
+			       access_ok(pool->start, pool->end - pool->start));
 			/* up_write(&ob->mm->mmap_sem); */
-			int ret = copy_to_user((void __user *)pool->start, pool->data,
-				pool->end - pool->start);
+			if (copy_to_user((void __user *)pool->start, pool->data,
+					 pool->end - pool->start))
+				pr_err(PREFIX "orbit failed to apply data\n");
 			/* if (down_write_killable(&ob->mm->mmap_sem))
 				panic("down failed"); */
-			printd("orbit apply data success %d\n", ret);
 			vfree(pool->data);
-			printd("orbit apply freed\n");
+			orb_dbg("orbit apply freed\n");
 			pool->data = NULL;
 		} else if (pool->snapshot.count != 0)
 			update_page_range(ob->mm, NULL, ob_vma, NULL,
-				pool->start, pool->end, ORBIT_UPDATE_APPLY,
-				&pool->snapshot);
-		printd("snapshot pte count left %ld", pool->snapshot.count);
+					  pool->start, pool->end,
+					  ORBIT_UPDATE_APPLY, &pool->snapshot);
+		orb_dbg("snapshot pte count left %ld", pool->snapshot.count);
 		snap_destroy(&pool->snapshot);
-#endif
 	}
 
 	/* up_write(&ob->mm->mmap_sem); */
 	up_read(&ob->mm->mmap_sem);
-	printd("orbit apply up\n");
+	orb_dbg("orbit apply up\n");
 
 	/* 3. Setup the user argument to call entry_func.
 	 * Current implementation is that the user runtime library passes
@@ -613,12 +853,13 @@ internalreturn orbit_return_internal(unsigned long retval)
 	 * syscall. The kernel will copy the arg to kernel space and copy to
 	 * the argbuf upon orbit_return.
 	 */
-	printd("task->arg = %p, info->argbuf = %p\n", task->arg, info->argbuf);
-	printd("task->func = %p, info->funcptr = %p\n", task->func, info->funcptr);
-	/* TODO: check error of copy_to_user */
-	if (task->argsize)
-		copy_to_user(info->argbuf, task->pools + task->npool, task->argsize);
-	copy_to_user(info->funcptr, &task->func, sizeof(orbit_entry));
+	orb_dbg("task->arg = %p, info->argbuf = %p\n", task->arg, info->argbuf);
+	orb_dbg("task->func = %p, info->funcptr = %p\n", task->func, info->funcptr);
+	if (task->argsize) {
+		if (copy_to_user(info->argbuf, task->pools + task->npool,
+				 task->argsize))
+			return -EINVAL;
+	}
 
 	/* 4. Return to userspace to start checker code */
 	return task->taskid;
@@ -636,7 +877,7 @@ internalreturn do_orbit_commit(void)
 {
 	struct task_struct *ob, *parent;
 	struct orbit_info *info;
-	struct orbit_task *task;	/* Both old and new task. */
+	struct orbit_task *task; /* Both old and new task. */
 	struct vm_area_struct *ob_vma, *parent_vma;
 	int ret;
 	struct pool_snapshot *pool;
@@ -645,8 +886,7 @@ internalreturn do_orbit_commit(void)
 		return -EINVAL;
 
 	ob = current;
-	parent = ob->orbit_child;	/* Currntly orbit_child in orbit is
-					 * reused as a pointer to parent. */
+	parent = ob->orbit_main;
 	info = ob->orbit_info;
 
 	task = info->current_task;
@@ -654,9 +894,9 @@ internalreturn do_orbit_commit(void)
 	for (pool = task->pools; pool < task->pools + task->npool; ++pool) {
 		ob_vma = find_vma(ob->mm, pool->start);
 		parent_vma = find_vma(parent->mm, pool->start);
-		ret = update_page_range(parent->mm, ob->mm,
-			parent_vma, ob_vma, pool->start, pool->end,
-			ORBIT_UPDATE_DIRTY, NULL);
+		ret = update_page_range(parent->mm, ob->mm, parent_vma, ob_vma,
+					pool->start, pool->end,
+					ORBIT_UPDATE_DIRTY, NULL);
 	}
 
 	return ret;
@@ -672,7 +912,7 @@ struct orbit_scratch {
 	void *ptr;
 	size_t cursor;
 	size_t size_limit;
-	size_t count;	/* Number of elements */
+	size_t count; /* Number of elements */
 };
 
 union orbit_result {
@@ -681,8 +921,8 @@ union orbit_result {
 };
 
 struct orbit_update_v {
-	struct list_head		elem;
-	struct orbit_scratch		userdata;
+	struct list_head elem;
+	struct orbit_scratch userdata;
 };
 
 static struct orbit_update_v *orbit_create_update_v(void)
@@ -701,7 +941,7 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 {
 	struct task_struct *ob, *parent;
 	struct orbit_info *info;
-	struct orbit_task *current_task;	/* Both old and new task. */
+	struct orbit_task *current_task; /* Both old and new task. */
 	struct vm_area_struct *ob_vma, *parent_vma;
 	int ret = 0;
 	struct orbit_update_v *new_update;
@@ -711,8 +951,7 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 		return -EINVAL;
 
 	ob = current;
-	parent = ob->orbit_child;	/* Currently orbit_child in orbit is
-					 * reused as a pointer to parent. */
+	parent = ob->orbit_main;
 	info = ob->orbit_info;
 
 	current_task = info->current_task;
@@ -725,12 +964,12 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 	if (new_update == NULL)
 		return -ENOMEM;
 
-	/* TODO: check return value of copy */
-
-#if DBG
+#ifdef DEBUG_COPY_MEMCPY
 	memcpy(&new_update->userdata, s, sizeof(struct orbit_scratch));
 #else
-	copy_from_user(&new_update->userdata, s, sizeof(struct orbit_scratch));
+	if (copy_from_user(&new_update->userdata, s,
+			   sizeof(struct orbit_scratch)))
+		return -EINVAL;
 #endif
 
 	scratch_start = (unsigned long)new_update->userdata.ptr;
@@ -740,8 +979,8 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 	ob_vma = find_vma(ob->mm, scratch_start);
 	parent_vma = find_vma(parent->mm, scratch_start);
 	ret = update_page_range(parent->mm, ob->mm, parent_vma, ob_vma,
-		scratch_start, scratch_end,
-		ORBIT_UPDATE_SNAPSHOT, NULL);
+				scratch_start, scratch_end,
+				ORBIT_UPDATE_SNAPSHOT, NULL);
 	if (ret) {
 		kfree(new_update);
 		return ret;
@@ -762,28 +1001,29 @@ SYSCALL_DEFINE1(orbit_sendv, struct orbit_scratch __user *, s)
 }
 
 /* Returns 1 on success. Returns 0 on end of updates. Returns -ERR on error. */
-internalreturn do_orbit_recvv(union orbit_result __user *result,
+internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 			      unsigned long taskid)
 {
 	struct task_struct *ob, *parent;
 	struct orbit_info *info;
-	struct orbit_task *task;	/* Both old and new task. */
+	struct orbit_task *task; /* Both old and new task. */
 	struct orbit_update_v *update;
 	int ret;
 	struct list_head *iter;
 	int found = 0;
 	int list_count = 0;
 
+	info = find_orbit_by_gobid(gobid, &ob);
+	if (info == NULL) {
+		printk(KERN_WARNING PREFIX "cannot find orbit %d\n", gobid);
+		return -EINVAL;
+	}
 	parent = current->group_leader;
-	ob = parent->orbit_child;
-
-	info = ob->orbit_info;
-
 	task = info->current_task;
 
 	/* TODO: maybe use rbtree along with the list? */
 	mutex_lock(&info->task_lock);
-	list_for_each(iter, &info->task_list) {
+	list_for_each (iter, &info->task_list) {
 		++list_count;
 		task = list_entry(iter, struct orbit_task, elem);
 		if (task->taskid == taskid) {
@@ -814,16 +1054,19 @@ internalreturn do_orbit_recvv(union orbit_result __user *result,
 	if (list_empty(&task->updates)) {
 		put_user(task->retval, &result->retval);
 		/* TODO: cleanup the task */
-		ret = 0;	/* End of updates. */
+		ret = 0; /* End of updates. */
 	} else {
-		update = list_first_entry(&task->updates, struct orbit_update_v, elem);
+		update = list_first_entry(&task->updates, struct orbit_update_v,
+					  elem);
 		list_del(&update->elem);
 
-		/* TODO: check return value of copy */
-#if DBG
-		memcpy(&result->scratch, &update->userdata, sizeof(struct orbit_scratch));
+#ifdef DEBUG_COPY_MEMCPY
+		memcpy(&result->scratch, &update->userdata,
+		       sizeof(struct orbit_scratch));
 #else
-		copy_to_user(&result->scratch, &update->userdata, sizeof(struct orbit_scratch));
+		if (copy_to_user(&result->scratch, &update->userdata,
+				 sizeof(struct orbit_scratch)))
+			return -EINVAL;
 #endif
 		kfree(update);
 
@@ -834,8 +1077,7 @@ internalreturn do_orbit_recvv(union orbit_result __user *result,
 	/* ARC free task object */
 	/* if (ret == 0 && refcount_dec_and_test(&task->refcount) == 1 &&
 		down_trylock(&task->finish) == 0) */
-	if (ret == 0 && down_trylock(&task->finish) == 0)
-	{
+	if (ret == 0 && down_trylock(&task->finish) == 0) {
 		mutex_lock(&info->task_lock);
 		list_del(&task->elem);
 		mutex_unlock(&info->task_lock);
@@ -845,14 +1087,14 @@ internalreturn do_orbit_recvv(union orbit_result __user *result,
 	return ret;
 }
 
-SYSCALL_DEFINE2(orbit_recvv, union orbit_result __user *, result,
+SYSCALL_DEFINE3(orbit_recvv, union orbit_result __user *, result, obid_t, gobid,
 		unsigned long, taskid)
 {
-	return do_orbit_recvv(result, taskid);
+	return do_orbit_recvv(result, gobid, taskid);
 }
 
 internalreturn do_orbit_mmap(unsigned long addr, unsigned long len,
-				int is_scratch)
+			     int is_scratch)
 {
 	unsigned long area;
 	int ret;
@@ -862,20 +1104,20 @@ internalreturn do_orbit_mmap(unsigned long addr, unsigned long len,
 		return -EINVAL;
 
 	area = ksys_mmap_pgoff(addr, len, PROT_READ | PROT_WRITE,
-			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+			       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if ((long)area <= 0)
 		return area;
 
 	/* FIXME: snapshot_share does not work with implicit vma_merge */
-	ret = snapshot_share(current->orbit_child->mm, current->mm, area);
+	ret = snapshot_share(current->orbit_main->mm, current->mm, area);
 	/* How to handle ret? */
-	printd("snapshot_share returns %d", ret);
+	orb_dbg("snapshot_share returns %d", ret);
 
 	return area;
 }
 
-SYSCALL_DEFINE3(orbit_mmap, unsigned long, addr, unsigned long, len,
-		int, is_scratch)
+SYSCALL_DEFINE3(orbit_mmap, unsigned long, addr, unsigned long, len, int,
+		is_scratch)
 {
 	return do_orbit_mmap(addr, len, is_scratch);
 }
@@ -884,7 +1126,7 @@ SYSCALL_DEFINE3(orbit_mmap, unsigned long, addr, unsigned long, len,
 /* #ifdef CONFIG_MMU */
 /* This is copied and modified from dup_mmap(). */
 static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
-	unsigned long addr)
+			  unsigned long addr)
 {
 	struct vm_area_struct *mpnt, *dst_near, *tmp;
 	int retval = 0;
@@ -905,7 +1147,8 @@ static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	/* Find src vma.
 	 * The area should have addr < vm_end, and addr == vm_start */
 	mpnt = find_vma(src_mm, addr);
-	if (mpnt == NULL) panic("mpnt is NULL!");
+	if (mpnt == NULL)
+		panic("mpnt is NULL!");
 	if (mpnt->vm_start != addr)
 		panic("mpnt->vm_start %lx, addr %lx", mpnt->vm_start, addr);
 
@@ -913,8 +1156,8 @@ static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	 * This can be potentially skipped if we allow snapshot at different
 	 * addresses in main program and orbit. */
 	dst_near = find_vma(dst_mm, addr);
-	printd("mpnt->vm_end %lx dst_near->vm_start %lx",
-		mpnt->vm_end, dst_near->vm_start);
+	orb_dbg("mpnt->vm_end %lx dst_near->vm_start %lx", mpnt->vm_end,
+	       dst_near->vm_start);
 	if (!(mpnt->vm_end < dst_near->vm_start)) {
 		panic("dst does not have space!");
 		retval = -EINTR;
