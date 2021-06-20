@@ -36,11 +36,13 @@
 
 #define ARG_SIZE_MAX 1024
 
+enum orbit_pool_mode { ORBIT_COW, ORBIT_MOVE, ORBIT_COPY, };
+
 /* FIXME: `start` and `end` should be platform-independent (void __user *)? */
 struct pool_range {
 	unsigned long start;
 	unsigned long end;
-	bool cow;
+	enum orbit_pool_mode mode;
 };
 
 struct orbit_call_args {
@@ -65,7 +67,7 @@ void snap_destroy(struct vma_snapshot *snap);
 
 struct pool_snapshot {
 	unsigned long start, end;
-	bool cow;
+	enum orbit_pool_mode mode;
 	struct vma_snapshot snapshot;
 	char *data;
 };
@@ -148,7 +150,7 @@ static struct orbit_task *orbit_create_task(
 	for (i = 0; i < npool; ++i) {
 		get_user(new_task->pools[i].start, &pools[i].start);
 		get_user(new_task->pools[i].end, &pools[i].end);
-		get_user(new_task->pools[i].cow, &pools[i].cow);
+		get_user(new_task->pools[i].mode, &pools[i].mode);
 		/* Initialize new_task->pools[i].
 		 * Actual marking is done later in orbit_call. */
 		snap_init(&new_task->pools[i].snapshot);
@@ -237,7 +239,7 @@ internalreturn orbit_call_internal(
 		printd("pool %ld size %ld", i, pool->end - pool->start);
 		/* TODO: kernel rules for cow */
 		/* if (pool->end - pool->start <= 8192) { */
-		if (!pool->cow) {
+		if (pool->mode == ORBIT_COPY) {
 			size_t pool_size = pool->end - pool->start;
 			if (pool_size == 0) {
 				pool->data = NULL;
@@ -264,6 +266,7 @@ internalreturn orbit_call_internal(
 				pool->start, pool->end,
 				ORBIT_UPDATE_SNAPSHOT, NULL);
 		} else {
+			/* TODO: ORBIT_MOVE */
 			ret = update_page_range(NULL, parent->mm,
 				NULL, parent_vma,
 				pool->start, pool->end,
