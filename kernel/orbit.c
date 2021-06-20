@@ -452,8 +452,8 @@ SYSCALL_DEFINE1(orbit_call, struct orbit_call_args __user *, uargs)
 {
 	struct orbit_call_args args;
 
-	/* TODO: check copy_from_user return value */
-	copy_from_user(&args, uargs, sizeof(struct orbit_call_args));
+	if (copy_from_user(&args, uargs, sizeof(struct orbit_call_args)))
+		return -EINVAL;
 
 	return orbit_call_internal(args.flags, args.gobid,
 		args.npool, args.pools, args.func, args.arg, args.argsize);
@@ -860,6 +860,9 @@ internalreturn orbit_return_internal(unsigned long retval)
 				 task->argsize))
 			return -EINVAL;
 	}
+	/* TODO: Clean up or kill? */
+	if (copy_to_user(info->funcptr, &task->func, sizeof(orbit_entry)))
+		return -EINVAL;
 
 	/* 4. Return to userspace to start checker code */
 	return task->taskid;
