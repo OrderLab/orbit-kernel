@@ -19,11 +19,13 @@
 #include <linux/userfaultfd_k.h>
 #include <linux/signal.h>
 #include <linux/rwlock_types.h>
+#include <linux/jiffies.h>
 
 #define PREFIX "orbit: "
 
 // change to #define for enabling more debug info just for this module
 #undef DEBUG_ORBIT
+#undef DEBUG_COPY_MEMCPY
 
 #ifdef DEBUG_ORBIT
 #define orb_dbg(fmt, ...)                                                      \
@@ -50,7 +52,7 @@ typedef void *(*orbit_entry)(void *);
 #define ARG_SIZE_MAX 1024
 
 /* Orbit name max length */
-#define ORBIT_NAME_LEN 16
+#define ORBIT_NAME_LEN 24
 
 /* FIXME: `start` and `end` should be platform-independent (void __user *)? */
 struct pool_range {
@@ -110,6 +112,7 @@ struct orbit_info {
 	void __user *argbuf;
 
 	struct semaphore sem;
+	struct semaphore exit_sem;
 	struct mutex task_lock;
 	struct list_head task_list; /* orbit_task queue */
 	/* TODO: use lockfree list for tasks and atomic for counter */
@@ -235,6 +238,7 @@ struct orbit_info *orbit_create_info(const char __user *name,
 
 	INIT_LIST_HEAD(&info->task_list);
 	sema_init(&info->sem, 0);
+	sema_init(&info->exit_sem, 0);
 	mutex_init(&info->task_lock);
 	info->current_task = info->next_task = NULL;
 	info->argbuf = argbuf;
@@ -248,6 +252,14 @@ struct orbit_info *orbit_create_info(const char __user *name,
 	}
 
 	return info;
+}
+
+bool signal_orbit_exit(struct task_struct *ob)
+{
+	if (!(ob && ob->is_orbit && ob->orbit_info))
+		return false;
+	up(&ob->orbit_info->exit_sem);
+	return true;
 }
 
 static int snapshot_share(struct mm_struct *dst_mm, struct mm_struct *src_mm,
@@ -432,6 +444,7 @@ SYSCALL_DEFINE1(orbit_destroy, obid_t, gobid)
 	struct orbit_info *info;
 	struct task_struct *ob;
 	struct pid *pid, *tgid;
+	int ret;
 
 	info = find_orbit_by_gobid(gobid, &ob);
 	if (info == NULL)
@@ -444,9 +457,34 @@ SYSCALL_DEFINE1(orbit_destroy, obid_t, gobid)
 	list_del(&ob->orbit_sibling);
 	pr_info(PREFIX "removed orbit from the main's orbit_children\n");
 	write_unlock(&orbitlist_lock);
-	do_send_sig_info(SIGKILL, SEND_SIG_PRIV, ob, PIDTYPE_TGID);
-	pr_info(PREFIX "terminated orbit %d of the main program %d\n",
+	pr_info(PREFIX "orbit %d's state is %ld\n", ob->pid, ob->state);
+	// inc ref count of the struct so we can access it after it's killed
+	get_task_struct(ob);
+	ret = do_send_sig_info(SIGKILL, SEND_SIG_PRIV, ob, PIDTYPE_TGID);
+	pr_info(PREFIX "%s orbit %d of the main program %d\n",
+		(ret == 0) ? "terminated" : "failed to terminate",
 		info->lobid, info->mpid);
+	/*
+	 * There can be a time delay between sending the SIGKILL to the orbit
+	 * task getting the signal, notifying its parent, and reaping itself.
+	 * Thus, checking the orbit after orbit_destroy returns can still
+	 * succeed.
+	 *
+	 * Here we add an `exit_sem` field in orbit_info to try to ensure the
+	 * orbit finishes reaping itself before the 'orbit_destroy' returns.
+	 * The exit_notify function in kernel/exit.c will signal this semaphore.
+	 *
+	 * To avoid potential indefinite blocking, use down_timeout instead of
+	 * down. The msecs_to_jiffies are a bit inaccurate. Using a small value
+	 * like 5 ms can cause premature returns even though the time has not
+	 * elapsed for more than 5 ms. Use a conservative 500 ms timeout.
+	 *
+	 */
+	if (down_timeout(&ob->orbit_info->exit_sem, msecs_to_jiffies(500)))
+		pr_info(PREFIX "timeout in waiting for orbit exit signal, "
+			"orbit exit state is %d\n", ob->exit_state);
+	// dec ref count of the task struct
+	put_task_struct(ob);
 	return 0;
 }
 
@@ -461,6 +499,7 @@ SYSCALL_DEFINE0(orbit_destroy_all)
 	write_lock(&orbitlist_lock);
 	list_for_each_safe(pos, q, &parent->orbit_children) {
 		ob = list_entry(pos, struct task_struct, orbit_sibling);
+		get_task_struct(ob);
 		list_del(pos);
 		pr_info(PREFIX "removed orbit from the main's orbit_children\n");
 		if (ob->orbit_info != NULL) {
@@ -470,7 +509,14 @@ SYSCALL_DEFINE0(orbit_destroy_all)
 			pr_info(PREFIX
 				"terminated orbit %d of the main program %d\n",
 				info->lobid, info->mpid);
+			if (down_timeout(&ob->orbit_info->exit_sem,
+					 msecs_to_jiffies(500)))
+				pr_info(PREFIX
+					"timeout in waiting for orbit exit signal, "
+					"orbit exit state is %d\n",
+					ob->exit_state);
 		}
+		put_task_struct(ob);
 	}
 	write_unlock(&orbitlist_lock);
 	return 0;
@@ -528,7 +574,7 @@ orbit_send_internal(const struct orbit_update_user __user *update)
 	if (new_update == NULL)
 		return -ENOMEM;
 
-#ifdef DEBUG_ORBIT
+#ifdef DEBUG_COPY_MEMCPY
 	memcpy(&new_update->userdata, update,
 	       sizeof(struct orbit_update_user) + length);
 #else
@@ -599,7 +645,7 @@ internalreturn orbit_recv_internal(obid_t gobid, unsigned long taskid,
 	list_del(&update->elem);
 	mutex_unlock(&task->updates_lock);
 
-#ifdef DEBUG_ORBIT
+#ifdef DEBUG_COPY_MEMCPY
 	memcpy(update_user, &update->userdata,
 	       sizeof(struct orbit_update_user) + update->userdata.length);
 #else
@@ -705,7 +751,11 @@ internalreturn orbit_return_internal(unsigned long retval)
 	/* 1. Wait for a task to come in */
 	/* TODO: make killable? */
 	orb_dbg("orbit return down\n");
-	down(&info->sem);
+	if (down_killable(&info->sem)) {
+		pr_info(PREFIX "orbit %d interrupted while waiting for tasks",
+			ob->pid);
+		return -EINTR;
+	}
 	orb_dbg("orbit return downed\n");
 	mutex_lock(&info->task_lock);
 	orb_dbg("orbit return locked 2\n");
@@ -743,11 +793,7 @@ internalreturn orbit_return_internal(unsigned long retval)
 		}
 		/* TODO: Update orbit vma list */
 		/* Copy page range */
-#ifdef DEBUG_ORBIT
-		pr_err(PREFIX "orbit cannot use parent_vma in debug mode");
-		return -EINVAL;
-		/* copy_page_range(ob->mm, parent->mm, parent_vma); */
-#else
+
 		/* FIXME: snapshot_share does not work with implicit vma_share */
 		/* if (!(ob_vma->vm_start <= pool->start &&
 			pool->end <= ob_vma->vm_start))
@@ -774,7 +820,6 @@ internalreturn orbit_return_internal(unsigned long retval)
 					  ORBIT_UPDATE_APPLY, &pool->snapshot);
 		orb_dbg("snapshot pte count left %ld", pool->snapshot.count);
 		snap_destroy(&pool->snapshot);
-#endif
 	}
 
 	/* up_write(&ob->mm->mmap_sem); */
@@ -898,7 +943,7 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 	if (new_update == NULL)
 		return -ENOMEM;
 
-#ifdef DEBUG_ORBIT
+#ifdef DEBUG_COPY_MEMCPY
 	memcpy(&new_update->userdata, s, sizeof(struct orbit_scratch));
 #else
 	if (copy_from_user(&new_update->userdata, s,
@@ -994,7 +1039,7 @@ internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 					  elem);
 		list_del(&update->elem);
 
-#ifdef DEBUG_ORBIT
+#ifdef DEBUG_COPY_MEMCPY
 		memcpy(&result->scratch, &update->userdata,
 		       sizeof(struct orbit_scratch));
 #else

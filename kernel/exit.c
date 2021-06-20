@@ -69,6 +69,9 @@
 #include <asm/pgtable.h>
 #include <asm/mmu_context.h>
 
+/* Obi-wan changes */
+#include <linux/orbit.h>
+
 static void __unhash_process(struct task_struct *p, bool group_dead)
 {
 	nr_threads--;
@@ -683,6 +686,11 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
 
 	list_for_each_entry_safe(p, n, &dead, ptrace_entry) {
 		list_del_init(&p->ptrace_entry);
+		/* Obi-wan changes */
+		if (p->is_orbit) {
+			pr_info("orbit: " "signal orbit %d exit sema\n", p->pid);
+			signal_orbit_exit(p);
+		}
 		release_task(p);
 	}
 }
