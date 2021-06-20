@@ -23,4 +23,6 @@ struct orbit_info *orbit_create_info(const char __user *name,
 struct orbit_info *find_orbit_by_gobid(obid_t gobid,
 				       struct task_struct **orbit);
 
+bool signal_orbit_exit(struct task_struct *ob);
+
 #endif /* __ORBIT_H__ */
