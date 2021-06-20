@@ -2006,13 +2006,6 @@ bool do_notify_parent(struct task_struct *tsk, int sig)
 	__wake_up_parent(tsk, tsk->parent);
 	spin_unlock_irqrestore(&psig->siglock, flags);
 
-	if (tsk->is_orbit) {
-		pr_info("is_orbit=%d, notifying PID %d's parent PID %d, sig=%d, autoreap=%d"
-			", ptrace=%d\n",
-			tsk->is_orbit, tsk->pid, tsk->parent->pid, sig,
-			autoreap, tsk->ptrace);
-	}
-
 	return autoreap;
 }
 
