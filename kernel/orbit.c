@@ -108,6 +108,16 @@ struct orbit_task {
 	 * see orbit_create_task. */
 };
 
+enum orbit_state
+{
+	ORBIT_NEW,
+	ORBIT_ATTACHED,
+	ORBIT_STARTED,
+	ORBIT_STOPPED,
+	ORBIT_DETTACHED,
+	ORBIT_DEAD
+};
+
 struct orbit_info {
 	void __user *argbuf;
 
@@ -128,6 +138,7 @@ struct orbit_info {
 	pid_t gobid; /* PID of this orbit task, globally unique */
 	obid_t lobid; /* Orbit id, starting from 1. It is locally unique
                      to the main program.*/
+	enum orbit_state state; /* state of orbit */
 	char name[ORBIT_NAME_LEN]; /* Name of orbit */
 };
 
@@ -197,6 +208,7 @@ SYSCALL_DEFINE4(orbit_create, const char __user *, name, void __user *, argbuf,
 		printk(KERN_ERR PREFIX "orbit_info is unexpectedly NULL\n");
 		return -EINVAL;
 	}
+	info->state = ORBIT_NEW;
 
 	// add the newly created orbit task_struct to the parent's orbit
 	// children list.
@@ -211,9 +223,9 @@ SYSCALL_DEFINE4(orbit_create, const char __user *, name, void __user *, argbuf,
 	info->gobid = pid_vnr(pid);
 	// set the orbit id to the main program's last id + 1
 	info->lobid = ++current->last_obid;
-	printk(KERN_INFO PREFIX
-	       "created orbit task '%s' <LOID %d, GOID %d> for main program <PID %d>\n",
-	       info->name, info->lobid, info->gobid, info->mpid);
+	pr_info(PREFIX "created orbit task '%s' <LOID %d, GOID %d> for main "
+		"program <PID %d>\n", info->name, info->lobid, info->gobid,
+		info->mpid);
 	// if user pointers are not null, save the orbit ids
 	if (lobid != NULL)
 		put_user(info->lobid, lobid);
@@ -223,6 +235,7 @@ SYSCALL_DEFINE4(orbit_create, const char __user *, name, void __user *, argbuf,
 	// waking up the orbit task before we return
 	wake_up_new_task(p);
 	put_pid(pid);
+	info->state = ORBIT_STARTED;
 	return info->gobid;
 }
 
@@ -266,6 +279,7 @@ bool signal_orbit_exit(struct task_struct *ob)
 	// Need to up all the semaphores that the main program or the kernel
 	// may be potentially waiting on for the orbit to prevent hanging
 	info = ob->orbit_info;
+	info->state = ORBIT_DEAD;
 	up(&info->exit_sem);
 	mutex_lock(&info->task_lock);
 	list_for_each (iter, &info->task_list) {
@@ -468,6 +482,7 @@ SYSCALL_DEFINE1(orbit_destroy, obid_t, gobid)
 	info = find_orbit_by_gobid(gobid, &ob);
 	if (info == NULL)
 		return -EINVAL;
+	info->state = ORBIT_STOPPED;
 	pid = task_pid(ob);
 	tgid = task_tgid(ob);
 	pr_info(PREFIX "to kill orbit pid (%d, %p) tgid (%d, %p)\n", ob->pid,
@@ -523,6 +538,7 @@ SYSCALL_DEFINE0(orbit_destroy_all)
 		pr_info(PREFIX "removed orbit from the main's orbit_children\n");
 		if (ob->orbit_info != NULL) {
 			info = ob->orbit_info;
+			info->state = ORBIT_STOPPED;
 			do_send_sig_info(SIGKILL, SEND_SIG_PRIV, ob,
 					 PIDTYPE_TGID);
 			pr_info(PREFIX
@@ -538,6 +554,19 @@ SYSCALL_DEFINE0(orbit_destroy_all)
 		put_task_struct(ob);
 	}
 	write_unlock(&orbitlist_lock);
+	return 0;
+}
+
+SYSCALL_DEFINE2(orbit_state, obid_t, gobid, enum orbit_state *, state)
+{
+	struct orbit_info *info;
+	struct task_struct *ob;
+
+	info = find_orbit_by_gobid(gobid, &ob);
+	if (info == NULL)
+		return -EINVAL;
+	if (state)
+		put_user(info->state, state);
 	return 0;
 }
 
