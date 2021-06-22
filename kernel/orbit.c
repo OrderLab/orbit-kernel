@@ -256,9 +256,28 @@ struct orbit_info *orbit_create_info(const char __user *name,
 
 bool signal_orbit_exit(struct task_struct *ob)
 {
+	struct orbit_info *info;
+	struct list_head *iter;
+	struct orbit_task *task;
+
 	if (!(ob && ob->is_orbit && ob->orbit_info))
 		return false;
-	up(&ob->orbit_info->exit_sem);
+
+	// Need to up all the semaphores that the main program or the kernel
+	// may be potentially waiting on for the orbit to prevent hanging
+	info = ob->orbit_info;
+	up(&info->exit_sem);
+	mutex_lock(&info->task_lock);
+	list_for_each (iter, &info->task_list) {
+		task = list_entry(iter, struct orbit_task, elem);
+		// release all task update's lock and semaphore
+		mutex_unlock(&task->updates_lock);
+		up(&task->updates_sem);
+	}
+	mutex_unlock(&info->task_lock);
+	pr_info(PREFIX "orbit %d's locks and semaphores released\n", info->gobid);
+
+	// TODO: clean up other resources as well here
 	return true;
 }
 
@@ -477,10 +496,10 @@ SYSCALL_DEFINE1(orbit_destroy, obid_t, gobid)
 	 * To avoid potential indefinite blocking, use down_timeout instead of
 	 * down. The msecs_to_jiffies are a bit inaccurate. Using a small value
 	 * like 5 ms can cause premature returns even though the time has not
-	 * elapsed for more than 5 ms. Use a conservative 500 ms timeout.
+	 * elapsed for more than 5 ms. Use a conservative 1000 ms timeout.
 	 *
 	 */
-	if (down_timeout(&ob->orbit_info->exit_sem, msecs_to_jiffies(500)))
+	if (down_timeout(&ob->orbit_info->exit_sem, msecs_to_jiffies(1000)))
 		pr_info(PREFIX "timeout in waiting for orbit exit signal, "
 			"orbit exit state is %d\n", ob->exit_state);
 	// dec ref count of the task struct
@@ -510,7 +529,7 @@ SYSCALL_DEFINE0(orbit_destroy_all)
 				"terminated orbit %d of the main program %d\n",
 				info->lobid, info->mpid);
 			if (down_timeout(&ob->orbit_info->exit_sem,
-					 msecs_to_jiffies(500)))
+					 msecs_to_jiffies(1000)))
 				pr_info(PREFIX
 					"timeout in waiting for orbit exit signal, "
 					"orbit exit state is %d\n",
@@ -789,7 +808,13 @@ internalreturn orbit_return_internal(unsigned long retval)
 		if (!(ob_vma->vm_start <= pool->start &&
 		      pool->end <= ob_vma->vm_end)) {
 			/* TODO: cleanup  */
-			panic("orbit error handling unimplemented!");
+			up_read(&ob->mm->mmap_sem);
+			pr_err(PREFIX
+			       "invalid address range of pool %ld: <vma_start %lx, "
+			       "vma_end %lx> <pool_start %lx, pool_end %lx>",
+			       pool - task->pools, ob_vma->vm_start,
+			       ob_vma->vm_end, pool->start, pool->end);
+			return -EINVAL;
 		}
 		/* TODO: Update orbit vma list */
 		/* Copy page range */
