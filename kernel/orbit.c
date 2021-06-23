@@ -280,6 +280,7 @@ bool signal_orbit_exit(struct task_struct *ob)
 	// may be potentially waiting on for the orbit to prevent hanging
 	info = ob->orbit_info;
 	info->state = ORBIT_DEAD;
+	up(&info->sem);
 	up(&info->exit_sem);
 	mutex_lock(&info->task_lock);
 	list_for_each (iter, &info->task_list) {
@@ -287,6 +288,7 @@ bool signal_orbit_exit(struct task_struct *ob)
 		// release all task update's lock and semaphore
 		mutex_unlock(&task->updates_lock);
 		up(&task->updates_sem);
+		up(&task->finish);
 	}
 	mutex_unlock(&info->task_lock);
 	pr_info(PREFIX "orbit %d's locks and semaphores released\n", info->gobid);
