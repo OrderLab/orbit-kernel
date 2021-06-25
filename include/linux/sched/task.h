@@ -9,6 +9,7 @@
 
 #include <linux/sched.h>
 #include <linux/uaccess.h>
+#include <linux/orbit.h>
 
 struct task_struct;
 struct rusage;
@@ -27,6 +28,7 @@ struct kernel_clone_args {
 	unsigned long stack_size;
 	unsigned long tls;
 	void __user *orbit_argbuf;
+	orbit_entry __user *orbit_funcptr;
 };
 
 /*

@@ -42,8 +42,6 @@
 
 #define internalreturn static long /* __attribute__((always_inline)) */
 
-typedef void *(*orbit_entry)(void *);
-
 /* Orbit flags */
 #define ORBIT_ASYNC 1 /* Whether the call is async */
 #define ORBIT_NORETVAL 2 /* Whether we want the return value.
@@ -54,11 +52,23 @@ typedef void *(*orbit_entry)(void *);
 /* Orbit name max length */
 #define ORBIT_NAME_LEN 24
 
+enum orbit_pool_mode { ORBIT_COW, ORBIT_MOVE, ORBIT_COPY, };
+
 /* FIXME: `start` and `end` should be platform-independent (void __user *)? */
 struct pool_range {
 	unsigned long start;
 	unsigned long end;
-	bool cow;
+	enum orbit_pool_mode mode;
+};
+
+struct orbit_call_args {
+	unsigned long flags;
+	obid_t gobid;
+	size_t npool;
+	struct pool_range __user *pools;
+	orbit_entry func;
+	void __user *arg;
+	size_t argsize;
 };
 
 __cacheline_aligned DEFINE_RWLOCK(orbitlist_lock);
@@ -75,7 +85,7 @@ void snap_destroy(struct vma_snapshot *snap);
 
 struct pool_snapshot {
 	unsigned long start, end;
-	bool cow;
+	enum orbit_pool_mode mode;
 	struct vma_snapshot snapshot;
 	char *data;
 };
@@ -90,6 +100,7 @@ struct orbit_task {
 	/* In non-async mode, orbit_call will wait on this semaphore. */
 	struct semaphore finish;
 
+	orbit_entry func;
 	void __user *arg;
 	size_t argsize;
 	unsigned long retval;
@@ -120,6 +131,7 @@ enum orbit_state
 
 struct orbit_info {
 	void __user *argbuf;
+	orbit_entry __user *funcptr;
 
 	struct semaphore sem;
 	struct semaphore exit_sem;
@@ -142,7 +154,7 @@ struct orbit_info {
 	char name[ORBIT_NAME_LEN]; /* Name of orbit */
 };
 
-static struct orbit_task *orbit_create_task(unsigned long flags,
+static struct orbit_task *orbit_create_task(unsigned long flags, orbit_entry func,
 					    void __user *arg, size_t argsize,
 					    size_t npool,
 					    struct pool_range __user *pools)
@@ -165,6 +177,7 @@ static struct orbit_task *orbit_create_task(unsigned long flags,
 	//else
 	sema_init(&new_task->finish, 0);
 	new_task->retval = 0;
+	new_task->func = func;
 	new_task->arg = arg;
 	new_task->argsize = argsize;
 	new_task->taskid = 0; /* taskid will be allocated later */
@@ -175,7 +188,7 @@ static struct orbit_task *orbit_create_task(unsigned long flags,
 	for (i = 0; i < npool; ++i) {
 		get_user(new_task->pools[i].start, &pools[i].start);
 		get_user(new_task->pools[i].end, &pools[i].end);
-		get_user(new_task->pools[i].cow, &pools[i].cow);
+		get_user(new_task->pools[i].mode, &pools[i].mode);
 		/* Initialize new_task->pools[i].
 		 * Actual marking is done later in orbit_call. */
 		snap_init(&new_task->pools[i].snapshot);
@@ -193,14 +206,15 @@ static struct orbit_task *orbit_create_task(unsigned long flags,
 	return new_task;
 }
 
-SYSCALL_DEFINE4(orbit_create, const char __user *, name, void __user *, argbuf,
-		pid_t __user *, mpid, obid_t __user *, lobid)
+SYSCALL_DEFINE5(orbit_create, const char __user *, name, void __user *, argbuf,
+		pid_t __user *, mpid, obid_t __user *, lobid,
+		orbit_entry __user *, funcptr)
 {
 	struct task_struct *p;
 	struct orbit_info *info;
 	struct pid *pid;
 
-	p = fork_to_orbit(name, argbuf);
+	p = fork_to_orbit(name, argbuf, funcptr);
 	if (IS_ERR(p))
 		return PTR_ERR(p);
 	info = p->orbit_info;
@@ -240,7 +254,7 @@ SYSCALL_DEFINE4(orbit_create, const char __user *, name, void __user *, argbuf,
 }
 
 struct orbit_info *orbit_create_info(const char __user *name,
-				     void __user *argbuf)
+		void __user *argbuf, orbit_entry __user *funcptr)
 {
 	struct orbit_info *info;
 	int error;
@@ -255,6 +269,7 @@ struct orbit_info *orbit_create_info(const char __user *name,
 	mutex_init(&info->task_lock);
 	info->current_task = info->next_task = NULL;
 	info->argbuf = argbuf;
+	info->funcptr = funcptr;
 	info->taskid_counter = 0; /* valid taskid starts from 1 */
 	if (name) {
 		error = strncpy_from_user(info->name, name, ORBIT_NAME_LEN);
@@ -340,7 +355,7 @@ struct orbit_info *find_orbit_by_gobid(obid_t gobid, struct task_struct **orbit)
 internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 				   size_t npool,
 				   struct pool_range __user *pools,
-				   void __user *arg, size_t argsize)
+				   orbit_entry func, void __user *arg, size_t argsize)
 {
 	struct task_struct *ob, *parent;
 	struct vm_area_struct *ob_vma, *parent_vma;
@@ -362,7 +377,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 	printk(KERN_DEBUG PREFIX "adding to orbit %d's task queue\n", gobid);
 
 	/* 2. Create a orbit task struct and add to the orbit's task queue. */
-	new_task = orbit_create_task(flags, arg, argsize, npool, pools);
+	new_task = orbit_create_task(flags, func, arg, argsize, npool, pools);
 	if (new_task == NULL)
 		return -ENOMEM;
 
@@ -386,7 +401,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 		orb_dbg("pool %ld size %ld", i, pool->end - pool->start);
 		/* TODO: kernel rules for cow */
 		/* if (pool->end - pool->start <= 8192) { */
-		if (!pool->cow) {
+		if (pool->mode == ORBIT_COPY) {
 			size_t pool_size = pool->end - pool->start;
 			if (pool_size == 0) {
 				pool->data = NULL;
@@ -423,6 +438,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 						pool->end,
 						ORBIT_UPDATE_SNAPSHOT, NULL);
 		} else {
+			/* TODO: ORBIT_MOVE */
 			ret = update_page_range(NULL, parent->mm, NULL,
 						parent_vma, pool->start,
 						pool->end, ORBIT_UPDATE_MARK,
@@ -460,18 +476,22 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 bad_orbit_call_cleanup:
 	for (i = 0; i < npool; ++i) {
 		struct pool_snapshot *pool = new_task->pools + i;
-		if (!pool->cow && pool->data)
+		if (pool->mode != ORBIT_COPY && pool->data)
 			vfree(pool->data);
 	}
 	kfree(new_task);
 	return ret;
 }
 
-SYSCALL_DEFINE6(orbit_call, unsigned long, flags, obid_t, gobid, size_t, npool,
-		struct pool_range __user *, pools, void __user *, arg, size_t,
-		argsize)
+SYSCALL_DEFINE1(orbit_call, struct orbit_call_args __user *, uargs)
 {
-	return orbit_call_internal(flags, gobid, npool, pools, arg, argsize);
+	struct orbit_call_args args;
+
+	if (copy_from_user(&args, uargs, sizeof(struct orbit_call_args)))
+		return -EINVAL;
+
+	return orbit_call_internal(args.flags, args.gobid,
+		args.npool, args.pools, args.func, args.arg, args.argsize);
 }
 
 SYSCALL_DEFINE1(orbit_destroy, obid_t, gobid)
@@ -890,11 +910,15 @@ internalreturn orbit_return_internal(unsigned long retval)
 	 * the argbuf upon orbit_return.
 	 */
 	orb_dbg("task->arg = %p, info->argbuf = %p\n", task->arg, info->argbuf);
+	orb_dbg("task->func = %p, info->funcptr = %p\n", task->func, info->funcptr);
 	if (task->argsize) {
 		if (copy_to_user(info->argbuf, task->pools + task->npool,
 				 task->argsize))
 			return -EINVAL;
 	}
+	/* TODO: Clean up or kill? */
+	if (copy_to_user(info->funcptr, &task->func, sizeof(orbit_entry)))
+		return -EINVAL;
 
 	/* 4. Return to userspace to start checker code */
 	return task->taskid;

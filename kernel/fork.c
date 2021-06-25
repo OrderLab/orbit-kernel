@@ -2546,7 +2546,8 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 }
 #endif
 
-struct task_struct *fork_to_orbit(const char __user *name, void __user *argbuf)
+struct task_struct *fork_to_orbit(const char __user *name, void __user *argbuf,
+		orbit_entry __user *funcptr)
 {
 	struct kernel_clone_args args = {
 		.flags = CLONE_FS | CLONE_ORBIT,
@@ -2563,7 +2564,7 @@ struct task_struct *fork_to_orbit(const char __user *name, void __user *argbuf)
 	tgid = task_tgid(task);
 	pr_info("created orbit pid (%d, %p) tgid (%d, %p)\n", task->pid, pid,
 		task->tgid, tgid);
-	task->orbit_info = orbit_create_info(name, argbuf);
+	task->orbit_info = orbit_create_info(name, argbuf, funcptr);
 	if (task->orbit_info == NULL) {
 		printk("failed to allocate orbit info\n");
 		goto bad_orbit_setup;

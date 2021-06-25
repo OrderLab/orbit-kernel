@@ -14,11 +14,14 @@
  */
 struct orbit_info;
 
-extern struct task_struct *fork_to_orbit(const char __user *name,
-					 void __user *argbuf);
+typedef unsigned long (*orbit_entry)(void __user *);
+
+struct task_struct *fork_to_orbit(const char __user *name, void __user *argbuf,
+				  orbit_entry __user *funcptr);
 
 struct orbit_info *orbit_create_info(const char __user *name,
-				     void __user *argbuf);
+				     void __user *argptr,
+				     orbit_entry __user *funcptr);
 
 struct orbit_info *find_orbit_by_gobid(obid_t gobid,
 				       struct task_struct **orbit);
