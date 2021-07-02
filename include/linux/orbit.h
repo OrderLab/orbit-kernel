@@ -4,6 +4,25 @@
 #include <linux/types.h>
 #include <linux/compiler_types.h>
 
+/* Different states an orbit may transition into.
+ */
+enum orbit_state {
+	ORBIT_NEW,
+	ORBIT_ATTACHED,
+	ORBIT_STARTED,
+	ORBIT_STOPPED,
+	ORBIT_DETTACHED,
+	ORBIT_DEAD
+};
+
+/* Supported mode of an orbit pool.
+ */
+enum orbit_pool_mode {
+	ORBIT_COW,
+	ORBIT_MOVE,
+	ORBIT_COPY
+};
+
 /* This struct is part of the task_struct. The is_orbit bit denotes whether the
  * process is an orbit.
  *

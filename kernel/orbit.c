@@ -1,4 +1,5 @@
 #include <linux/orbit.h>
+#include <linux/orbit_internal.h>
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -49,121 +50,21 @@
 
 #define ARG_SIZE_MAX 1024
 
-/* Orbit name max length */
-#define ORBIT_NAME_LEN 24
-
-enum orbit_pool_mode { ORBIT_COW, ORBIT_MOVE, ORBIT_COPY, };
-
-/* FIXME: `start` and `end` should be platform-independent (void __user *)? */
-struct pool_range {
-	unsigned long start;
-	unsigned long end;
-	enum orbit_pool_mode mode;
-};
-
-struct orbit_call_args {
-	unsigned long flags;
-	obid_t gobid;
-	size_t npool;
-	struct pool_range __user *pools;
-	orbit_entry func;
-	void __user *arg;
-	size_t argsize;
-};
-
 __cacheline_aligned DEFINE_RWLOCK(orbitlist_lock);
-
-/* Duplicated struct definition, should be eventually moved to mm.h */
-struct vma_snapshot {
-	size_t count;
-	size_t head, tail; /* Cursor in the first and last snap_block */
-	struct list_head list;
-};
 
 void snap_init(struct vma_snapshot *snap);
 void snap_destroy(struct vma_snapshot *snap);
 
-struct pool_snapshot {
-	unsigned long start, end;
-	enum orbit_pool_mode mode;
-	struct vma_snapshot snapshot;
-	char *data;
-};
-
-struct orbit_task {
-	unsigned long taskid; /* valid taskid starts from 1 */
-	unsigned long flags;
-	struct list_head elem;
-	/* ARC. Value should be list_size(updates).
-	 * This is currently only used in ORBIT_ASYNC mode. */
-	refcount_t refcount;
-	/* In non-async mode, orbit_call will wait on this semaphore. */
-	struct semaphore finish;
-
-	orbit_entry func;
-	void __user *arg;
-	size_t argsize;
-	unsigned long retval;
-
-	struct mutex updates_lock; /* lock for update list */
-	struct semaphore updates_sem;
-	/* List of updates to be applied
-	 * FIXME: Currently this is shared between update and update_v */
-	struct list_head updates;
-
-	/* Memory ranges snapshotted. Variable-sized struct. */
-	size_t npool;
-	struct pool_snapshot pools[];
-
-	/* Extra field: char arg_data[] starting at (char*)(pools + npool),
-	 * see orbit_create_task. */
-};
-
-enum orbit_state
-{
-	ORBIT_NEW,
-	ORBIT_ATTACHED,
-	ORBIT_STARTED,
-	ORBIT_STOPPED,
-	ORBIT_DETTACHED,
-	ORBIT_DEAD
-};
-
-struct orbit_info {
-	void __user *argbuf;
-	orbit_entry __user *funcptr;
-
-	struct semaphore sem;
-	struct semaphore exit_sem;
-	struct mutex task_lock;
-	struct list_head task_list; /* orbit_task queue */
-	/* TODO: use lockfree list for tasks and atomic for counter */
-	unsigned long taskid_counter;
-	/* FIXME: This is a hack to get current running task. Ideally we should
-	 * support multiple checker tasks at the same time. */
-	struct orbit_task *current_task;
-	/* Pointer to the next task. NULL when queue is empty. This field will
-	 * be updated when inserting or popping a task into/from the queue. */
-	struct orbit_task *next_task;
-
-	pid_t mpid; /* PID of the attached main program */
-	pid_t gobid; /* PID of this orbit task, globally unique */
-	obid_t lobid; /* Orbit id, starting from 1. It is locally unique
-                     to the main program.*/
-	enum orbit_state state; /* state of orbit */
-	char name[ORBIT_NAME_LEN]; /* Name of orbit */
-};
-
-static struct orbit_task *orbit_create_task(unsigned long flags, orbit_entry func,
-					    void __user *arg, size_t argsize,
-					    size_t npool,
-					    struct pool_range __user *pools)
+static struct orbit_task *
+orbit_create_task(unsigned long flags, orbit_entry func, void __user *arg,
+		  size_t argsize, size_t npool,
+		  struct orbit_pool_range __user *pools)
 {
 	struct orbit_task *new_task;
 	size_t i;
 
 	new_task = kmalloc(sizeof(*new_task) + argsize +
-				   npool * sizeof(struct pool_snapshot),
+				   npool * sizeof(struct orbit_pool_snapshot),
 			   GFP_KERNEL);
 	if (new_task == NULL)
 		return NULL;
@@ -354,8 +255,9 @@ struct orbit_info *find_orbit_by_gobid(obid_t gobid, struct task_struct **orbit)
  * In async mode, this returns a taskid integer. */
 internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 				   size_t npool,
-				   struct pool_range __user *pools,
-				   orbit_entry func, void __user *arg, size_t argsize)
+				   struct orbit_pool_range __user *pools,
+				   orbit_entry func, void __user *arg,
+				   size_t argsize)
 {
 	struct task_struct *ob, *parent;
 	struct vm_area_struct *ob_vma, *parent_vma;
@@ -394,7 +296,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 	}
 
 	for (i = 0; i < npool; ++i) {
-		struct pool_snapshot *pool = new_task->pools + i;
+		struct orbit_pool_snapshot *pool = new_task->pools + i;
 
 		parent_vma = find_vma(parent->mm, pool->start);
 
@@ -475,7 +377,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 
 bad_orbit_call_cleanup:
 	for (i = 0; i < npool; ++i) {
-		struct pool_snapshot *pool = new_task->pools + i;
+		struct orbit_pool_snapshot *pool = new_task->pools + i;
 		if (pool->mode != ORBIT_COPY && pool->data)
 			vfree(pool->data);
 	}
@@ -759,7 +661,7 @@ internalreturn orbit_return_internal(unsigned long retval)
 	struct orbit_info *info;
 	struct orbit_task *task; /* Both old and new task. */
 	struct vm_area_struct *ob_vma;
-	struct pool_snapshot *pool;
+	struct orbit_pool_snapshot *pool;
 
 	if (!current->is_orbit) {
 		printk("calling orbit_return on a non-orbit task\n");
@@ -939,7 +841,7 @@ internalreturn do_orbit_commit(void)
 	struct orbit_task *task; /* Both old and new task. */
 	struct vm_area_struct *ob_vma, *parent_vma;
 	int ret;
-	struct pool_snapshot *pool;
+	struct orbit_pool_snapshot *pool;
 
 	if (!current->is_orbit)
 		return -EINVAL;
