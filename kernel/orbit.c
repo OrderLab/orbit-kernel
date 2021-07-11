@@ -210,7 +210,7 @@ SYSCALL_DEFINE5(orbit_create, const char __user *, name, void __user *, argbuf,
 		pid_t __user *, mpid, obid_t __user *, lobid,
 		orbit_entry __user *, funcptr)
 {
-	struct task_struct *p;
+	struct task_struct *p, *parent;
 	struct orbit_info *info;
 	struct pid *pid;
 
@@ -226,17 +226,18 @@ SYSCALL_DEFINE5(orbit_create, const char __user *, name, void __user *, argbuf,
 
 	// add the newly created orbit task_struct to the parent's orbit
 	// children list.
+	parent = current->group_leader;
 	write_lock(&orbitlist_lock);
-	list_add_tail(&p->orbit_sibling, &current->orbit_children);
+	list_add_tail(&p->orbit_sibling, &parent->orbit_children);
 	write_unlock(&orbitlist_lock);
 
 	/* setup other fields of orbit_info */
-	// the main PID of the orbit task is the current task's PID
-	info->mpid = task_pid_nr(current);
+	// the main PID of the orbit task is the parent task's PID
+	info->mpid = task_pid_nr(parent);
 	pid = get_task_pid(p, PIDTYPE_PID);
 	info->gobid = pid_vnr(pid);
 	// set the orbit id to the main program's last id + 1
-	info->lobid = ++current->last_obid;
+	info->lobid = ++parent->last_obid;
 	pr_info(PREFIX "created orbit task '%s' <LOID %d, GOID %d> for main "
 		"program <PID %d>\n", info->name, info->lobid, info->gobid,
 		info->mpid);
