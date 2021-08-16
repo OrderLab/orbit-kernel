@@ -53,6 +53,8 @@
 #include <asm/tlb.h>
 #include <asm/mmu_context.h>
 
+#include <linux/orbit.h>
+
 #include "internal.h"
 
 #ifndef arch_mmap_check
@@ -69,6 +71,8 @@ const int mmap_rnd_compat_bits_min = CONFIG_ARCH_MMAP_RND_COMPAT_BITS_MIN;
 const int mmap_rnd_compat_bits_max = CONFIG_ARCH_MMAP_RND_COMPAT_BITS_MAX;
 int mmap_rnd_compat_bits __read_mostly = CONFIG_ARCH_MMAP_RND_COMPAT_BITS;
 #endif
+
+struct task_struct *mmap_current = NULL;
 
 static bool ignore_rlimit_data;
 core_param(ignore_rlimit_data, ignore_rlimit_data, bool, 0644);
@@ -1392,7 +1396,8 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			unsigned long pgoff, unsigned long *populate,
 			struct list_head *uf)
 {
-	struct mm_struct *mm = current->mm;
+	struct task_struct *tcurr = mmap_current ? mmap_current : current;
+	struct mm_struct *mm = tcurr->mm;
 	int pkey = 0;
 
 	*populate = 0;
@@ -1406,7 +1411,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	 * (the exception is when the underlying filesystem is noexec
 	 *  mounted, in which case we dont add PROT_EXEC.)
 	 */
-	if ((prot & PROT_READ) && (current->personality & READ_IMPLIES_EXEC))
+	if ((prot & PROT_READ) && (tcurr->personality & READ_IMPLIES_EXEC))
 		if (!(file && path_noexec(&file->f_path)))
 			prot |= PROT_EXEC;
 
@@ -1617,6 +1622,11 @@ unsigned long ksys_mmap_pgoff(unsigned long addr, unsigned long len,
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 
 	retval = vm_mmap_pgoff(file, addr, len, prot, flags, pgoff);
+
+	if (addr == 0 && (len == 4096 * 16) && (flags & MAP_ANONYMOUS) && (flags & MAP_PRIVATE))
+		printk(KERN_INFO "mmap_pgoff called for addr %lx, len %lu"
+		       ", retval=%lx\n", addr, len, retval);
+
 out_fput:
 	if (file)
 		fput(file);
@@ -1628,6 +1638,66 @@ SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
 		unsigned long, fd, unsigned long, pgoff)
 {
 	return ksys_mmap_pgoff(addr, len, prot, flags, fd, pgoff);
+}
+
+SYSCALL_DEFINE5(orbit_mmap_pair, obid_t, gobid, unsigned long, addr, unsigned long, len,
+		unsigned long, prot, unsigned long, flags)
+{
+	struct task_struct *orbit;
+	struct orbit_info *info;
+	struct mm_struct *orbit_mm;
+	unsigned long pgoff, pglen, main_mmap_addr, orbit_mmap_addr, orbit_flags;
+	LIST_HEAD(uf);
+
+	info = find_orbit_by_gobid(gobid, &orbit);
+	if (info == NULL) {
+		printk("could not find orbit %d\n", gobid);
+		return -EINVAL;
+	}
+	orbit_mm = orbit->mm;
+	if (orbit_mm->map_count > sysctl_max_map_count)
+		return -ENOMEM;
+
+	// Since orbit is a subordinate, we let the main program decide
+	// the address to map to. Thus, we first call ksys_mmap_pgoff
+	pglen = PAGE_ALIGN(len);
+	main_mmap_addr = ksys_mmap_pgoff(addr, len, prot, flags, -1, 0);
+	if (main_mmap_addr <= 0)
+		return main_mmap_addr;
+
+	// next, we add the MAP_FIXED flag to fix this address we just obtained
+	// from the main task's mmap to the orbit task
+	orbit_flags = flags | MAP_FIXED;
+
+	// FIXME: duplicated logic from 'vm_mmap_pgoff'
+	if (down_write_killable(&orbit_mm->mmap_sem))
+		return -EINTR;
+
+	// NOTE: a bunch of places in mmap sources and others (sys_x86_64.c)
+	// use the current task to query and manipulate the mm struct,
+	// e.g., checking unmapped areas. We added switches in these
+	// places to use a special mmap_current instead. It's a bit ugly,
+	// but it avoids cumbersome wrappers and interface changes.
+	mmap_current = orbit;
+	orbit_mmap_addr = orbit_mm->get_unmapped_area(NULL, main_mmap_addr,
+		pglen, pgoff, orbit_flags);
+	if (orbit_mmap_addr != main_mmap_addr) {
+		pr_err("orbit: " "main mmap address %lx cannot be fixed at orbit"
+		       " obtained addr %lx\n", main_mmap_addr, orbit_mmap_addr);
+		orbit_mmap_addr = -EINVAL;
+	} else if (!offset_in_page(orbit_mmap_addr)) {
+		// this is the key step to map the address to the same location
+		// in the orbit address space
+		orbit_mmap_addr =
+			mmap_region(NULL, orbit_mmap_addr, pglen, 0, 0, &uf);
+	}
+	// reset the mmap_current to NULL to avoid breaking other callers
+	mmap_current = NULL;
+	pr_info("orbit: successfully created mmap address %lx at both the "
+		"main task and orbit task", main_mmap_addr);
+	up_write(&orbit_mm->mmap_sem);
+	userfaultfd_unmap_complete(orbit_mm, &uf);
+	return orbit_mmap_addr;
 }
 
 #ifdef __ARCH_WANT_SYS_OLD_MMAP
@@ -1712,7 +1782,8 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 		unsigned long len, vm_flags_t vm_flags, unsigned long pgoff,
 		struct list_head *uf)
 {
-	struct mm_struct *mm = current->mm;
+	struct task_struct *tcurr = mmap_current ? mmap_current : current;
+	struct mm_struct *mm = tcurr->mm;
 	struct vm_area_struct *vma, *prev;
 	int error;
 	struct rb_node **rb_link, *rb_parent;
@@ -1832,7 +1903,7 @@ out:
 	if (vm_flags & VM_LOCKED) {
 		if ((vm_flags & VM_SPECIAL) || vma_is_dax(vma) ||
 					is_vm_hugetlb_page(vma) ||
-					vma == get_gate_vma(current->mm))
+					vma == get_gate_vma(tcurr->mm))
 			vma->vm_flags &= VM_LOCKED_CLEAR_MASK;
 		else
 			mm->locked_vm += (len >> PAGE_SHIFT);
@@ -1884,7 +1955,8 @@ unsigned long unmapped_area(struct vm_unmapped_area_info *info)
 	 * - gap_end - gap_start >= length
 	 */
 
-	struct mm_struct *mm = current->mm;
+	struct task_struct *tcurr = mmap_current ? mmap_current : current;
+	struct mm_struct *mm = tcurr->mm;
 	struct vm_area_struct *vma;
 	unsigned long length, low_limit, high_limit, gap_start, gap_end;
 
@@ -1979,7 +2051,8 @@ found:
 
 unsigned long unmapped_area_topdown(struct vm_unmapped_area_info *info)
 {
-	struct mm_struct *mm = current->mm;
+	struct task_struct *tcurr = mmap_current ? mmap_current : current;
+	struct mm_struct *mm = tcurr->mm;
 	struct vm_area_struct *vma;
 	unsigned long length, low_limit, high_limit, gap_start, gap_end;
 
@@ -2101,7 +2174,8 @@ unsigned long
 arch_get_unmapped_area(struct file *filp, unsigned long addr,
 		unsigned long len, unsigned long pgoff, unsigned long flags)
 {
-	struct mm_struct *mm = current->mm;
+	struct task_struct *tcurr = mmap_current ? mmap_current : current;
+	struct mm_struct *mm = tcurr->mm;
 	struct vm_area_struct *vma, *prev;
 	struct vm_unmapped_area_info info;
 	const unsigned long mmap_end = arch_get_mmap_end(addr);
@@ -2141,8 +2215,9 @@ arch_get_unmapped_area_topdown(struct file *filp, unsigned long addr,
 			  unsigned long len, unsigned long pgoff,
 			  unsigned long flags)
 {
+	struct task_struct *tcurr = mmap_current ? mmap_current : current;
 	struct vm_area_struct *vma, *prev;
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = tcurr->mm;
 	struct vm_unmapped_area_info info;
 	const unsigned long mmap_end = arch_get_mmap_end(addr);
 
@@ -2193,6 +2268,7 @@ unsigned long
 get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 		unsigned long pgoff, unsigned long flags)
 {
+	struct task_struct *tcurr;
 	unsigned long (*get_area)(struct file *, unsigned long,
 				  unsigned long, unsigned long, unsigned long);
 
@@ -2204,7 +2280,8 @@ get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 	if (len > TASK_SIZE)
 		return -ENOMEM;
 
-	get_area = current->mm->get_unmapped_area;
+	tcurr = mmap_current ? mmap_current : current;
+	get_area = tcurr->mm->get_unmapped_area;
 	if (file) {
 		if (file->f_op->get_unmapped_area)
 			get_area = file->f_op->get_unmapped_area;

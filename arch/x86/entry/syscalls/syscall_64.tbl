@@ -370,6 +370,8 @@
 444	common	orbit_destroy		__x64_sys_orbit_destroy
 445	common	orbit_destroy_all		__x64_sys_orbit_destroy_all
 446	common	orbit_state   __x64_sys_orbit_state
+447	common	orbit_mmap __x64_sys_orbit_mmap
+448	common	orbit_mmap_pair __x64_sys_orbit_mmap_pair
 
 #
 # x32-specific system call numbers start at 512 to avoid cache impact
