@@ -77,7 +77,8 @@ orbit_create_task(unsigned long flags, orbit_entry func, void __user *arg,
 	refcount_set(&new_task->refcount, 0);
 	//else
 	sema_init(&new_task->finish, 0);
-	new_task->retval = 0;
+	/* process error by default, orbit_return will overwrite this */
+	new_task->retval = -ESRCH;
 	new_task->func = func;
 	new_task->arg = arg;
 	new_task->argsize = argsize;
@@ -193,6 +194,15 @@ bool signal_orbit_exit(struct task_struct *ob)
 	if (!(ob && ob->is_orbit && ob->orbit_info))
 		return false;
 
+	/* TODO: should we just move this logic our of destroy? */
+	if (ob->orbit_sibling.prev != LIST_POISON1) {
+		write_lock(&orbitlist_lock);
+		if (ob->orbit_sibling.prev != LIST_POISON1)
+			list_del(&ob->orbit_sibling);
+		write_unlock(&orbitlist_lock);
+		pr_info(PREFIX "removed orbit from the main's orbit_children\n");
+	}
+
 	// Need to up all the semaphores that the main program or the kernel
 	// may be potentially waiting on for the orbit to prevent hanging
 	info = ob->orbit_info;
@@ -277,7 +287,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 		pr_err(PREFIX "cannot find orbit %d\n", gobid);
 		return -EINVAL;
 	}
-	printk(KERN_DEBUG PREFIX "adding to orbit %d's task queue\n", gobid);
+	orb_dbg("adding to orbit %d's task queue\n", gobid);
 
 	/* 2. Create a orbit task struct and add to the orbit's task queue. */
 	new_task = orbit_create_task(flags, func, arg, argsize, npool, pools);
@@ -1014,9 +1024,13 @@ internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 
 	/* It is a return. */
 	if (list_empty(&task->updates)) {
-		put_user(task->retval, &result->retval);
-		/* TODO: cleanup the task */
-		ret = 0; /* End of updates. */
+		if (task->retval == -ESRCH) {
+			ret = -ESRCH;
+		} else {
+			put_user(task->retval, &result->retval);
+			/* TODO: cleanup the task */
+			ret = 0; /* End of updates. */
+		}
 	} else {
 		update = list_first_entry(&task->updates, struct orbit_update_v,
 					  elem);
@@ -1039,7 +1053,7 @@ internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 	/* ARC free task object */
 	/* if (ret == 0 && refcount_dec_and_test(&task->refcount) == 1 &&
 		down_trylock(&task->finish) == 0) */
-	if (ret == 0 && down_trylock(&task->finish) == 0) {
+	if (ret != 1 && down_trylock(&task->finish) == 0) {
 		mutex_lock(&info->task_lock);
 		list_del(&task->elem);
 		mutex_unlock(&info->task_lock);

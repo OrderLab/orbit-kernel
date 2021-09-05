@@ -62,7 +62,9 @@ struct orbit_task {
 	orbit_entry func;
 	void __user *arg;
 	size_t argsize;
-	unsigned long retval;
+	/* Return value to syscall (non-negative are successful return value,
+	 * negative are error codes) */
+	long retval;
 
 	struct mutex updates_lock; /* lock for update list */
 	struct semaphore updates_sem;
