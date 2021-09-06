@@ -674,6 +674,11 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
 		autoreap = true;
 	}
 
+	/* Obi-wan changes */
+	if (tsk->is_orbit)
+		pr_info("orbit: " "orbit %d exit, autoreap=%d\n",
+			tsk->pid, autoreap);
+
 	if (autoreap) {
 		tsk->exit_state = EXIT_DEAD;
 		list_add(&tsk->ptrace_entry, &dead);
