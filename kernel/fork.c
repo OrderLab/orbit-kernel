@@ -2551,7 +2551,7 @@ struct task_struct *fork_to_orbit(const char __user *name, void __user *argbuf,
 {
 	struct kernel_clone_args args = {
 		.flags = CLONE_FS | CLONE_ORBIT,
-		.exit_signal = 0,
+		.exit_signal	= SIGCHLD,
 	};
 
 	struct task_struct *task;
