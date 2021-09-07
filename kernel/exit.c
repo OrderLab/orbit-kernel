@@ -674,11 +674,6 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
 		autoreap = true;
 	}
 
-	/* Obi-wan changes */
-	if (tsk->is_orbit)
-		pr_info("orbit: " "orbit %d exit, autoreap=%d\n",
-			tsk->pid, autoreap);
-
 	if (autoreap) {
 		tsk->exit_state = EXIT_DEAD;
 		list_add(&tsk->ptrace_entry, &dead);
@@ -689,13 +684,15 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
 		wake_up_process(tsk->signal->group_exit_task);
 	write_unlock_irq(&tasklist_lock);
 
+	/* Obi-wan changes */
+	if (tsk->is_orbit) {
+		pr_info("orbit: " "orbit %d exits, autoreap=%d, "
+			"signal exit semaphores\n",tsk->pid, autoreap);
+		signal_orbit_exit(tsk);
+	}
+
 	list_for_each_entry_safe(p, n, &dead, ptrace_entry) {
 		list_del_init(&p->ptrace_entry);
-		/* Obi-wan changes */
-		if (p->is_orbit) {
-			pr_info("orbit: " "signal orbit %d exit sema\n", p->pid);
-			signal_orbit_exit(p);
-		}
 		release_task(p);
 	}
 }

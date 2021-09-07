@@ -1972,10 +1972,16 @@ bool do_notify_parent(struct task_struct *tsk, int sig)
 
 	psig = tsk->parent->sighand;
 	spin_lock_irqsave(&psig->siglock, flags);
+
 	/* Obi-wan changes */
 	// If the killed task is orbit AND the parent does not care about the
-	// orbit (no special handler for SIGCHLD), it should be self-reaped
-	if ((tsk->is_orbit || !tsk->ptrace) && sig == SIGCHLD &&
+	// orbit (no special handler for SIGCHLD), it should be self-reaped.
+	//
+	// Note: originally this if condition does not check the case where the
+	// sa_handler is empty (0). Not sure why.. Add the check when the
+	// task is an orbit
+	if (sig == SIGCHLD && ((tsk->is_orbit &&
+	    psig->action[SIGCHLD-1].sa.sa_handler) || !tsk->ptrace) &&
 	    (psig->action[SIGCHLD-1].sa.sa_handler == SIG_IGN ||
 	     (psig->action[SIGCHLD-1].sa.sa_flags & SA_NOCLDWAIT))) {
 		/*

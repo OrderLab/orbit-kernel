@@ -193,19 +193,21 @@ bool signal_orbit_exit(struct task_struct *ob)
 
 	if (!(ob && ob->is_orbit && ob->orbit_info))
 		return false;
+	info = ob->orbit_info;
 
-	/* TODO: should we just move this logic our of destroy? */
-	if (ob->orbit_sibling.prev != LIST_POISON1) {
+	/* TODO: should we just move this logic out of destroy? */
+	// We should remove the orbit from the main's list only if the
+	// orbit is not being explicitly destroyed.
+	if (info->state  != ORBIT_STOPPED) {
+		pr_info(PREFIX "orbit %d exits without being destroyed explicitly"
+			", removing it from main's orbit_children\n", ob->pid);
 		write_lock(&orbitlist_lock);
 		if (ob->orbit_sibling.prev != LIST_POISON1)
 			list_del(&ob->orbit_sibling);
 		write_unlock(&orbitlist_lock);
-		pr_info(PREFIX "removed orbit from the main's orbit_children\n");
 	}
-
 	// Need to up all the semaphores that the main program or the kernel
 	// may be potentially waiting on for the orbit to prevent hanging
-	info = ob->orbit_info;
 	info->state = ORBIT_DEAD;
 	up(&info->sem);
 	up(&info->exit_sem);
@@ -424,7 +426,7 @@ SYSCALL_DEFINE1(orbit_destroy, obid_t, gobid)
 		pid, ob->tgid, tgid);
 	write_lock(&orbitlist_lock);
 	list_del(&ob->orbit_sibling);
-	pr_info(PREFIX "removed orbit from the main's orbit_children\n");
+	pr_info(PREFIX "removed orbit %d from main's orbit_children\n", ob->pid);
 	write_unlock(&orbitlist_lock);
 	pr_info(PREFIX "orbit %d's state is %ld\n", ob->pid, ob->state);
 	// inc ref count of the struct so we can access it after it's killed
@@ -470,7 +472,7 @@ SYSCALL_DEFINE0(orbit_destroy_all)
 		ob = list_entry(pos, struct task_struct, orbit_sibling);
 		get_task_struct(ob);
 		list_del(pos);
-		pr_info(PREFIX "removed orbit from the main's orbit_children\n");
+		pr_info(PREFIX "removed orbit %d from main's orbit_children\n", ob->pid);
 		if (ob->orbit_info != NULL) {
 			info = ob->orbit_info;
 			info->state = ORBIT_STOPPED;
