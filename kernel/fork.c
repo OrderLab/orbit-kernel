@@ -2550,7 +2550,7 @@ struct task_struct *fork_to_orbit(const char __user *name, void __user *argbuf,
 		orbit_entry __user *funcptr)
 {
 	struct kernel_clone_args args = {
-		.flags = CLONE_FS | CLONE_ORBIT,
+		.flags = CLONE_FS | CLONE_PTRACE | CLONE_ORBIT,
 		.exit_signal	= SIGCHLD,
 	};
 
@@ -2562,8 +2562,8 @@ struct task_struct *fork_to_orbit(const char __user *name, void __user *argbuf,
 		return task;
 	pid = task_pid(task);
 	tgid = task_tgid(task);
-	pr_info("created orbit pid (%d, %p) tgid (%d, %p)\n", task->pid, pid,
-		task->tgid, tgid);
+	pr_info("orbit: " "created orbit pid (%d, %p), tgid (%d, %p), ptrace %d\n",
+		task->pid, pid, task->tgid, tgid, task->ptrace);
 	task->orbit_info = orbit_create_info(name, argbuf, funcptr);
 	if (task->orbit_info == NULL) {
 		printk("failed to allocate orbit info\n");
