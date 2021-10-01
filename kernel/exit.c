@@ -69,6 +69,9 @@
 #include <asm/pgtable.h>
 #include <asm/mmu_context.h>
 
+/* Obi-wan changes */
+#include <linux/orbit.h>
+
 static void __unhash_process(struct task_struct *p, bool group_dead)
 {
 	nr_threads--;
@@ -681,6 +684,13 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
 		wake_up_process(tsk->signal->group_exit_task);
 	write_unlock_irq(&tasklist_lock);
 
+	/* Obi-wan changes */
+	if (tsk->is_orbit) {
+		pr_info("orbit: " "orbit %d exits, autoreap=%d, "
+			"signal exit semaphores\n",tsk->pid, autoreap);
+		signal_orbit_exit(tsk);
+	}
+
 	list_for_each_entry_safe(p, n, &dead, ptrace_entry) {
 		list_del_init(&p->ptrace_entry);
 		release_task(p);
@@ -796,7 +806,7 @@ void __noreturn do_exit(long code)
 	taskstats_exit(tsk, group_dead);
 
 	static bool output = true;
-	if (output && current->group_leader->orbit_child) {
+	if (output && list_empty(&current->group_leader->orbit_children)) {
 		output = false;
 		printk("orbit task last plt waiters %d\n", atomic_read(&current->mm->lock_waiters));
 		printk("orbit task ptl max waiter %d\n", current->mm->max_lock_waiters);

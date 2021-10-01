@@ -70,3 +70,9 @@
 	ret
 	_ASM_NOKPROBE(.L_restore)
 #endif
+
+ENTRY(__thunk_symbol_hack)
+	ret
+	ENDPROC(__thunk_symbol_hack)
+	_ASM_NOKPROBE(__thunk_symbol_hack)
+EXPORT_SYMBOL(__thunk_symbol_hack)

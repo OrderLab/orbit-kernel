@@ -24,6 +24,8 @@
 #include <asm/syscalls.h>
 #include <asm/mpx.h>
 
+extern struct task_struct *mmap_current;
+
 /*
  * Align a virtual address to avoid aliasing in the I$ on AMD F15h.
  */
@@ -132,7 +134,8 @@ unsigned long
 arch_get_unmapped_area(struct file *filp, unsigned long addr,
 		unsigned long len, unsigned long pgoff, unsigned long flags)
 {
-	struct mm_struct *mm = current->mm;
+	struct task_struct *tcurr = mmap_current ? mmap_current : current;
+	struct mm_struct *mm = tcurr->mm;
 	struct vm_area_struct *vma;
 	struct vm_unmapped_area_info info;
 	unsigned long begin, end;
@@ -175,8 +178,9 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 			  const unsigned long len, const unsigned long pgoff,
 			  const unsigned long flags)
 {
+	struct task_struct *tcurr = mmap_current ? mmap_current : current;
 	struct vm_area_struct *vma;
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = tcurr->mm;
 	unsigned long addr = addr0;
 	struct vm_unmapped_area_info info;
 

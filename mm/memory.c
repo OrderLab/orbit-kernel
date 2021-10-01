@@ -5340,13 +5340,18 @@ update_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	if (CKPT && mode == ORBIT_UPDATE_MARK)
 		ckpts[3].clk += get_cycles() - ckpts[0].clk;
 	if (page) {
+		int counter_type;
 		get_page(page);
 		if (CKPT && mode == ORBIT_UPDATE_MARK)
 			ckpts[4].clk += get_cycles() - ckpts[0].clk;
 		page_dup_rmap(page, false);
 		if (CKPT && mode == ORBIT_UPDATE_MARK)
 			ckpts[5].clk += get_cycles() - ckpts[0].clk;
-		rss[mm_counter(page)]++;
+		counter_type = mm_counter(page);
+		if (unlikely(counter_type != MM_ANONPAGES))
+			pr_alert("BUG: assumed page to be anonymous, got %d\n",
+				counter_type);
+		rss[counter_type]++;
 	} else if (pte_devmap(pte)) {
 		page = pte_page(pte);
 	}
@@ -5383,6 +5388,7 @@ out_set_pte:
 	/* TODO: optimize same pte for APPLY */
 	zap_pte_one_orbit(tlb, rss, dst_vma, dst_pmd, dst_pte, addr);
 
+	rss[MM_ANONPAGES]++;
 	set_pte_at(dst_mm, addr, dst_pte, pte);
 	return 0;
 }
@@ -5488,7 +5494,6 @@ again:
 		spin_unlock(src_ptl);
 	if (orig_src_pte)
 		pte_unmap(orig_src_pte);
-	/* TODO: apply rss to snap */
 	if (dst_mm)
 		add_mm_rss_vec(dst_mm, rss);
 
@@ -5788,6 +5793,11 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		tlb_gather_mmu(&tlb, dst_mm, addr, end);
 		update_hiwater_rss(dst_mm);
 	}
+
+	/* Both mapping should be anonymous */
+	if ((src_vma && !vma_is_anonymous(src_vma)) ||
+	    (dst_vma && !vma_is_anonymous(dst_vma)))
+		return -EINVAL;
 
 	/* unmap_vmas(&tlb, vma, addr, end); */
 
