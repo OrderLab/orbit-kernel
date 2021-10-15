@@ -3,6 +3,7 @@
 
 #include <linux/orbit.h>
 #include <linux/mutex.h>
+#include <linux/spinlock.h>
 #include <linux/semaphore.h>
 #include <linux/list.h>
 #include <linux/refcount.h>
@@ -16,7 +17,7 @@ struct orbit_info {
 
 	struct semaphore sem;
 	struct semaphore exit_sem;
-	struct mutex task_lock;
+	spinlock_t task_lock;
 	struct list_head task_list; /* orbit_task queue */
 	/* TODO: use lockfree list for tasks and atomic for counter */
 	unsigned long taskid_counter;

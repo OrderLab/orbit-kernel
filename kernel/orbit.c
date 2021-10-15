@@ -169,7 +169,7 @@ struct orbit_info *orbit_create_info(const char __user *name,
 	INIT_LIST_HEAD(&info->task_list);
 	sema_init(&info->sem, 0);
 	sema_init(&info->exit_sem, 0);
-	mutex_init(&info->task_lock);
+	spin_lock_init(&info->task_lock);
 	info->current_task = info->next_task = NULL;
 	info->argbuf = argbuf;
 	info->funcptr = funcptr;
@@ -211,7 +211,7 @@ bool signal_orbit_exit(struct task_struct *ob)
 	info->state = ORBIT_DEAD;
 	up(&info->sem);
 	up(&info->exit_sem);
-	mutex_lock(&info->task_lock);
+	spin_lock(&info->task_lock);
 	list_for_each (iter, &info->task_list) {
 		task = list_entry(iter, struct orbit_task, elem);
 		// release all task update's lock and semaphore
@@ -219,7 +219,7 @@ bool signal_orbit_exit(struct task_struct *ob)
 		up(&task->updates_sem);
 		up(&task->finish);
 	}
-	mutex_unlock(&info->task_lock);
+	spin_unlock(&info->task_lock);
 	pr_info(PREFIX "orbit %d's locks and semaphores released\n", info->gobid);
 
 	// TODO: clean up other resources as well here
@@ -322,7 +322,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 				pool->data = NULL;
 				continue;
 			}
-			pool->data = vmalloc(pool_size);
+			pool->data = kmalloc(pool_size, GFP_KERNEL);
 			if (pool->data) {
 				orb_dbg("Orbit allocated %ld\n", pool_size);
 			} else {
@@ -366,7 +366,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 
 	/* Add task to the queue */
 	/* TODO: make killable? */
-	mutex_lock(&info->task_lock);
+	spin_lock(&info->task_lock);
 
 	/* Allocate taskid; valid taskid starts from 1 */
 	/* TODO: will this overflow? */
@@ -374,7 +374,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 	list_add_tail(&new_task->elem, &info->task_list);
 	if (info->next_task == NULL)
 		info->next_task = new_task;
-	mutex_unlock(&info->task_lock);
+	spin_unlock(&info->task_lock);
 	up(&info->sem);
 
 	/* 3. Return from main in async mode, */
@@ -392,7 +392,7 @@ bad_orbit_call_cleanup:
 	for (i = 0; i < npool; ++i) {
 		struct orbit_pool_snapshot *pool = new_task->pools + i;
 		if (pool->mode != ORBIT_COPY && pool->data)
-			vfree(pool->data);
+			kfree(pool->data);
 	}
 	kfree(new_task);
 	return ret;
@@ -599,7 +599,7 @@ internalreturn orbit_recv_internal(obid_t gobid, unsigned long taskid,
 	}
 
 	/* TODO: maybe use rbtree along with the list? */
-	mutex_lock(&info->task_lock);
+	spin_lock(&info->task_lock);
 	list_for_each (iter, &info->task_list) {
 		task = list_entry(iter, struct orbit_task, elem);
 		if (task->taskid == taskid) {
@@ -607,7 +607,7 @@ internalreturn orbit_recv_internal(obid_t gobid, unsigned long taskid,
 			break;
 		}
 	}
-	mutex_unlock(&info->task_lock);
+	spin_unlock(&info->task_lock);
 
 	if (!found) {
 		printk("taskid %lu not found", taskid);
@@ -698,7 +698,7 @@ internalreturn orbit_return_internal(unsigned long retval)
 		task->retval = retval;
 
 		orb_dbg("orbit return locking\n");
-		mutex_lock(&info->task_lock);
+		spin_lock(&info->task_lock);
 		orb_dbg("orbit return locked\n");
 
 		info->next_task = list_is_last(&task->elem, &info->task_list) ?
@@ -727,7 +727,7 @@ internalreturn orbit_return_internal(unsigned long retval)
 			up(&task->finish);
 		}
 
-		mutex_unlock(&info->task_lock);
+		spin_unlock(&info->task_lock);
 		orb_dbg("orbit return unlocked\n");
 	}
 
@@ -742,13 +742,13 @@ internalreturn orbit_return_internal(unsigned long retval)
 		return -EINTR;
 	}
 	orb_dbg("orbit return downed\n");
-	mutex_lock(&info->task_lock);
+	spin_lock(&info->task_lock);
 	orb_dbg("orbit return locked 2\n");
 	info->current_task = task = info->next_task;
 	info->next_task = list_is_last(&task->elem, &info->task_list) ?
 				  NULL :
 				  list_next_entry(task, elem);
-	mutex_unlock(&info->task_lock);
+	spin_unlock(&info->task_lock);
 	orb_dbg("orbit return unlocked 2\n");
 
 	/* if (down_write_killable(&ob->mm->mmap_sem)) { */
@@ -802,7 +802,7 @@ internalreturn orbit_return_internal(unsigned long retval)
 				pr_err(PREFIX "orbit failed to apply data\n");
 			/* if (down_write_killable(&ob->mm->mmap_sem))
 				panic("down failed"); */
-			vfree(pool->data);
+			kfree(pool->data);
 			orb_dbg("orbit apply freed\n");
 			pool->data = NULL;
 		} else if (pool->snapshot.count != 0)
@@ -996,7 +996,7 @@ internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 	task = info->current_task;
 
 	/* TODO: maybe use rbtree along with the list? */
-	mutex_lock(&info->task_lock);
+	spin_lock(&info->task_lock);
 	list_for_each (iter, &info->task_list) {
 		++list_count;
 		task = list_entry(iter, struct orbit_task, elem);
@@ -1005,7 +1005,7 @@ internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 			break;
 		}
 	}
-	mutex_unlock(&info->task_lock);
+	spin_unlock(&info->task_lock);
 
 	if (list_count > 100)
 		printk("warning: orbit list size %d", list_count);
@@ -1056,9 +1056,9 @@ internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 	/* if (ret == 0 && refcount_dec_and_test(&task->refcount) == 1 &&
 		down_trylock(&task->finish) == 0) */
 	if (ret != 1 && down_trylock(&task->finish) == 0) {
-		mutex_lock(&info->task_lock);
+		spin_lock(&info->task_lock);
 		list_del(&task->elem);
-		mutex_unlock(&info->task_lock);
+		spin_unlock(&info->task_lock);
 		kfree(task);
 	}
 
