@@ -345,8 +345,9 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 			orb_dbg("copied\n");
 			if (down_read_killable(&parent->mm->mmap_sem))
 				panic("down failed");
-		} else if (0 && list_empty(&info->task_list)) {
-			/* FIXME: we need ob lock */
+		} else if (list_empty(&info->task_list)) {
+			/* We probably don't need ob's mmap_sem since
+			 * there is no task running. */
 			ob_vma = find_vma(ob->mm, pool->start);
 			ret = update_page_range(ob->mm, parent->mm, ob_vma,
 						parent_vma, pool->start,

@@ -2476,6 +2476,13 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 		mem_cgroup_commit_charge(new_page, memcg, false, false);
 		lru_cache_add_active_or_unevictable(new_page, vma);
 		/*
+		 * Orbit changes
+		 * Update the pmd modified bitmap
+		 * FIXME: there are a lot more places that can do set_pte,
+		 * add this to those places.
+		 */
+		pmd_bitmap_set(*vmf->pmd, vmf->address);
+		/*
 		 * We call the notify macro here because, when using secondary
 		 * mmu page tables (such as kvm shadow page tables), we want the
 		 * new page to be mapped directly into the secondary page table.
@@ -5122,6 +5129,9 @@ static int update_pte_range(
 	int progress = 0;
 	int rss[NR_MM_COUNTERS];
 	swp_entry_t entry = (swp_entry_t){0};
+	unsigned long *src_pmd_bitmap, *dst_pmd_bitmap, bitmap;
+	unsigned long lsb, next_pte_dist, current_bitmap_group = 0;
+	bool bitmap_inited = false;
 
 	/* zap operations */
 	if (dst_mm)
@@ -5145,6 +5155,32 @@ again:
 	orig_src_pte = src_pte;
 	orig_dst_pte = dst_pte;
 
+	/* Incremental snapshotting */
+	if (mode == ORBIT_UPDATE_SNAPSHOT && !bitmap_inited) {
+		src_pmd_bitmap = pmd_bitmap(*src_pmd);
+		dst_pmd_bitmap = pmd_bitmap(*dst_pmd);
+		/* printk("src bitmap: %lx\n", *src_pmd_bitmap); */
+		/* printk("dst bitmap: %lx\n", *dst_pmd_bitmap); */
+		bitmap = *src_pmd_bitmap | *dst_pmd_bitmap;
+		if (bitmap == 0) {
+			spin_unlock(src_ptl);
+			pte_unmap(orig_src_pte);
+			pte_unmap_unlock(orig_dst_pte, dst_ptl);
+			return 0;
+		}
+		/* FIXME: fix for the case when addr does not start from the
+		 * first page of PMD. */
+		lsb = __ffs(bitmap);
+		/* Note that bitmap is the bitmap with cleared lsb */
+		bitmap &= ~BIT(lsb);
+		src_pte += lsb * PMD_BITMAP_PAGES_PER_BIT;
+		dst_pte += lsb * PMD_BITMAP_PAGES_PER_BIT;
+		addr += lsb * PMD_BITMAP_PAGES_PER_BIT * PAGE_SIZE;
+		/* Iterate PMD_BITMAP_PAGES_PER_BIT times for each group */
+		current_bitmap_group = PMD_BITMAP_PAGES_PER_BIT;
+		bitmap_inited = true;
+	}
+
 	/* zap operations */
 	if (dst_mm)
 		flush_tlb_batched_pending(tlb->mm);
@@ -5152,6 +5188,45 @@ again:
 	arch_enter_lazy_mmu_mode();
 
 	do {
+		if (mode == ORBIT_UPDATE_SNAPSHOT) {
+			/* printk("snap: addr=%lx, lsb=%lx\n", addr, lsb);
+			printk("snap: bitmap=%lx\n", bitmap);
+			printk("snap: src bitmap=%lx\n", *src_pmd_bitmap);
+			printk("snap: dst bitmap=%lx\n", *dst_pmd_bitmap);
+			printk("snap: current_bitmap_group=%lx\n",
+					current_bitmap_group); */
+			/* Increment 1 for PMD_BITMAP_PAGES_PER_BIT times, and
+			 * run the other branch when current_bitmap_group is 0.
+			 * We set those values at the beginning of loop
+			 * instead of checking at the last line, because there
+			 * is a continue in the middle. */
+			if (current_bitmap_group) {
+				next_pte_dist = 1;
+			} else {
+				if (bitmap == 0) {
+					addr = end;
+					break;
+				} else {
+					*src_pmd_bitmap &= ~BIT(lsb);
+					*dst_pmd_bitmap &= ~BIT(lsb);
+					/* At the end of the group, jump to
+					 * the next group, but since we have
+					 * already added group pages times, we
+					 * are at the end of current group.
+					 * The needed dist of bits is actually
+					 * dist - 1. */
+					next_pte_dist = (__ffs(bitmap) - lsb - 1)
+						* PMD_BITMAP_PAGES_PER_BIT;
+					lsb = __ffs(bitmap);
+					bitmap &= ~BIT(lsb);
+					current_bitmap_group =
+						PMD_BITMAP_PAGES_PER_BIT;
+					continue;
+				}
+			}
+		} else {
+			next_pte_dist = 1;
+		}
 		/*
 		 * We are holding two locks at this point - either of them
 		 * could generate latencies in another task on another CPU.
@@ -5165,6 +5240,10 @@ again:
 		}
 		if (src_pte && pte_none(*src_pte)) {
 			progress++;
+			/* Decrement the group no matter what mode, since we
+			 * won't be using it in other modes anyway. We can also
+			 * save a condition check instruction. */
+			--current_bitmap_group;
 			continue;
 		}
 		if (mode == ORBIT_UPDATE_APPLY && snap_empty(snap)) {
@@ -5177,8 +5256,10 @@ again:
 		if (entry.val)
 			break;
 		progress += 8;
-	} while ((dst_pte ? dst_pte++ : NULL), (src_pte ? src_pte++ : NULL),
-		addr += PAGE_SIZE, addr != end);
+		--current_bitmap_group;
+	} while ((dst_pte ? dst_pte += next_pte_dist : NULL),
+		(src_pte ? src_pte += next_pte_dist : NULL),
+		addr += next_pte_dist * PAGE_SIZE, addr != end);
 
 	arch_leave_lazy_mmu_mode();
 	if (src_ptl)
