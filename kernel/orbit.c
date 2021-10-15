@@ -440,6 +440,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 				panic("down failed");
 			ckpt("after-down");
 		} else if (list_empty(&info->task_list)) {
+			ckpt("begin-cow");
 			/* We probably don't need ob's mmap_sem since
 			 * there is no task running. */
 			ob_vma = find_vma(ob->mm, pool->start);
@@ -449,16 +450,17 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 						pool->end,
 						ORBIT_UPDATE_SNAPSHOT, NULL);
 			in_orbit_call = NULL;
+			ckpt("end-cow");
 		} else {
 			/* TODO: ORBIT_MOVE */
-			ckpt("begin-cow");
+			/* ckpt("begin-cow"); */
 			in_orbit_call = current;
 			ret = update_page_range(NULL, parent->mm, NULL,
 						parent_vma, pool->start,
 						pool->end, ORBIT_UPDATE_MARK,
 						&pool->snapshot);
-			ckpt("end-cow");
 			in_orbit_call = NULL;
+			/* ckpt("end-cow"); */
 		}
 	}
 #else

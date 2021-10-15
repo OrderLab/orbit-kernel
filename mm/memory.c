@@ -5588,7 +5588,7 @@ again:
 		clk = get_cycles();
 	/* u64 t = ktime_get_ns(); */
 	cond_resched();
-	if (CKPT && ORBIT_UPDATE_MARK) {
+	if (CKPT && mode == ORBIT_UPDATE_MARK) {
 		++scnt;
 		ckpts[1].clk += get_cycles() - clk;
 	}
@@ -5820,7 +5820,7 @@ enum { COUNTER_BASE = __COUNTER__ };
 #define CKPT 0
 
 #define ckpt(s) \
-	do { if(CKPT && mode == ORBIT_UPDATE_MARK) { \
+	do { if(CKPT && (mode == ORBIT_UPDATE_MARK || mode == ORBIT_UPDATE_SNAPSHOT)) { \
 		int cnt = __COUNTER__ - COUNTER_BASE - 1; \
 		if (cnt == 0) { \
 			ckpts[0] = (struct ckpt_t) { \
@@ -5965,8 +5965,7 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	}
 	ckpt("src_flush");
 
-
-	if (CKPT && mode == ORBIT_UPDATE_MARK) {
+	if (CKPT && (mode == ORBIT_UPDATE_MARK || mode == ORBIT_UPDATE_SNAPSHOT)) {
 		int i;
 		int total = __COUNTER__ - COUNTER_BASE - 1;
 		++tcnt;
@@ -5976,8 +5975,10 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 
 		printk("update_page_range total %llu ns, %llu cycles\n",
 			ckpts[total - 1].t / tcnt, ckpts[total - 1].clk / tcnt);
-		printk("pmdcnt = %d, tcnt = %d, pmdcnt / tcnt = %d, pgcnt = %d, snapcnt %ld\n",
-			pmdcnt, tcnt, pmdcnt/ tcnt, pagecnt / tcnt, snap->count);
+		printk("pmdcnt = %d, tcnt = %d, pmdcnt / tcnt = %d, pgcnt = %d,"
+			" snapcnt %ld\n",
+			pmdcnt, tcnt, pmdcnt / tcnt, pagecnt / tcnt,
+			snap ? snap->count : 0);
 
 		ckpts[0].t = 0;
 		ckpts[0].clk = 0;
