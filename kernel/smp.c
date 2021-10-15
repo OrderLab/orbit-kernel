@@ -23,6 +23,9 @@
 
 #include "smpboot.h"
 
+#include <linux/timekeeping.h>
+#include <linux/timex.h>
+
 enum {
 	CSD_FLAG_LOCK		= 0x01,
 	CSD_FLAG_SYNCHRONOUS	= 0x02,
@@ -395,6 +398,26 @@ call:
 }
 EXPORT_SYMBOL_GPL(smp_call_function_any);
 
+enum { SMP_CALL_COUNTER_BASE = __COUNTER__ };
+
+#define CKPT 0
+
+#define ckpt(s) \
+	do { if(CKPT && ob) { \
+		int cnt = __COUNTER__ - SMP_CALL_COUNTER_BASE - 1; \
+		if (cnt == 0) { \
+			ckpts[0] = (struct ckpt_t) { \
+				.clk = get_cycles(), \
+				.t = ktime_get_ns(), \
+				.name = s, \
+			}; \
+		} else { \
+			ckpts[cnt].clk += get_cycles() - ckpts[0].clk; \
+			ckpts[cnt].t += ktime_get_ns() - ckpts[0].t; \
+			ckpts[cnt].name = s; \
+		} \
+	} } while (0)
+
 /**
  * smp_call_function_many(): Run a function on a set of other CPUs.
  * @mask: The set of cpus to run on (only runs on online subset).
@@ -414,6 +437,16 @@ void smp_call_function_many(const struct cpumask *mask,
 {
 	struct call_function_data *cfd;
 	int cpu, next_cpu, this_cpu = smp_processor_id();
+
+	extern struct task_struct *in_orbit_call;
+	bool ob = in_orbit_call == current;
+
+	static int tcnt = 0;
+	static struct ckpt_t {
+		cycles_t clk;
+		u64 t;
+		const char *name;
+	} ckpts[32] = { { 0, 0, NULL, }, };
 
 	/*
 	 * Can deadlock when called with interrupts disabled.
@@ -461,6 +494,8 @@ void smp_call_function_many(const struct cpumask *mask,
 	if (unlikely(!cpumask_weight(cfd->cpumask)))
 		return;
 
+	ckpt("init");
+
 	cpumask_clear(cfd->cpumask_ipi);
 	for_each_cpu(cpu, cfd->cpumask) {
 		call_single_data_t *csd = per_cpu_ptr(cfd->csd, cpu);
@@ -473,9 +508,11 @@ void smp_call_function_many(const struct cpumask *mask,
 		if (llist_add(&csd->llist, &per_cpu(call_single_queue, cpu)))
 			__cpumask_set_cpu(cpu, cfd->cpumask_ipi);
 	}
+	ckpt("all cpu set state");
 
 	/* Send a message to all CPUs in the map */
 	arch_send_call_function_ipi_mask(cfd->cpumask_ipi);
+	ckpt("send");
 
 	if (wait) {
 		for_each_cpu(cpu, cfd->cpumask) {
@@ -485,8 +522,34 @@ void smp_call_function_many(const struct cpumask *mask,
 			csd_lock_wait(csd);
 		}
 	}
+
+	ckpt("wait");
+
+	if (CKPT && ob) {
+		int i;
+		int total = __COUNTER__ - SMP_CALL_COUNTER_BASE - 1;
+		++tcnt;
+
+		if (tcnt % 10000 == 0) {
+
+		printk("orbit: smp call avg %llu ns, %llu cycles\n",
+			ckpts[total - 1].t / tcnt, ckpts[total - 1].clk / tcnt);
+
+		ckpts[0].t = 0;
+		ckpts[0].clk = 0;
+		for (i = 1; i < total; ++i) {
+			printk("CKPT %20s takes: %10llu ns, %10llu cycles\n",
+				ckpts[i].name, (ckpts[i].t - ckpts[i - 1].t) / tcnt,
+				(ckpts[i].clk - ckpts[i - 1].clk) / tcnt);
+		}
+
+		}
+	}
 }
 EXPORT_SYMBOL(smp_call_function_many);
+
+#undef CKPT
+#undef ckpt
 
 /**
  * smp_call_function(): Run a function on all other CPUs.
@@ -653,6 +716,26 @@ void on_each_cpu_mask(const struct cpumask *mask, smp_call_func_t func,
 }
 EXPORT_SYMBOL(on_each_cpu_mask);
 
+enum { COUNTER_BASE = __COUNTER__ };
+
+#define CKPT 0
+
+#define ckpt(s) \
+	do { if(CKPT && ob) { \
+		int cnt = __COUNTER__ - COUNTER_BASE - 1; \
+		if (cnt == 0) { \
+			ckpts[0] = (struct ckpt_t) { \
+				.clk = get_cycles(), \
+				.t = ktime_get_ns(), \
+				.name = s, \
+			}; \
+		} else { \
+			ckpts[cnt].clk += get_cycles() - ckpts[0].clk; \
+			ckpts[cnt].t += ktime_get_ns() - ckpts[0].t; \
+			ckpts[cnt].name = s; \
+		} \
+	} } while (0)
+
 /*
  * on_each_cpu_cond(): Call a function on each processor for which
  * the supplied function cond_func returns true, optionally waiting
@@ -687,14 +770,29 @@ void on_each_cpu_cond_mask(bool (*cond_func)(int cpu, void *info),
 	cpumask_var_t cpus;
 	int cpu, ret;
 
+	extern struct task_struct *in_orbit_call;
+	bool ob = in_orbit_call == current;
+
+	static int tcnt = 0;
+	static struct ckpt_t {
+		cycles_t clk;
+		u64 t;
+		const char *name;
+	} ckpts[32] = { { 0, 0, NULL, }, };
+
+	ckpt("init");
+
 	might_sleep_if(gfpflags_allow_blocking(gfp_flags));
+	ckpt("sleep");
 
 	if (likely(zalloc_cpumask_var(&cpus, (gfp_flags|__GFP_NOWARN)))) {
 		preempt_disable();
 		for_each_cpu(cpu, mask)
 			if (cond_func(cpu, info))
 				__cpumask_set_cpu(cpu, cpus);
+		ckpt("before cpu mask");
 		on_each_cpu_mask(cpus, func, info, wait);
+		ckpt("after cpu mask");
 		preempt_enable();
 		free_cpumask_var(cpus);
 	} else {
@@ -711,8 +809,34 @@ void on_each_cpu_cond_mask(bool (*cond_func)(int cpu, void *info),
 			}
 		preempt_enable();
 	}
+
+	ckpt("end");
+
+	if (CKPT && ob) {
+		int i;
+		int total = __COUNTER__ - COUNTER_BASE - 1;
+		++tcnt;
+
+		if (tcnt % 10000 == 0) {
+
+		printk("orbit: on_each_cpu_cond_mask avg %llu ns, %llu cycles\n",
+			ckpts[total - 1].t / tcnt, ckpts[total - 1].clk / tcnt);
+
+		ckpts[0].t = 0;
+		ckpts[0].clk = 0;
+		for (i = 1; i < total; ++i) {
+			printk("CKPT %20s takes: %10llu ns, %10llu cycles\n",
+				ckpts[i].name, (ckpts[i].t - ckpts[i - 1].t) / tcnt,
+				(ckpts[i].clk - ckpts[i - 1].clk) / tcnt);
+		}
+
+		}
+	}
 }
 EXPORT_SYMBOL(on_each_cpu_cond_mask);
+
+#undef CKPT
+#undef ckpt
 
 void on_each_cpu_cond(bool (*cond_func)(int cpu, void *info),
 			smp_call_func_t func, void *info, bool wait,

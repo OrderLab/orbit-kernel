@@ -18,6 +18,9 @@
 
 #include "mm_internal.h"
 
+#include <linux/timekeeping.h>
+#include <linux/timex.h>
+
 /*
  *	TLB flushing, formerly SMP-only
  *		c/o Linus Torvalds.
@@ -666,15 +669,49 @@ static bool tlb_is_not_lazy(int cpu, void *data)
 	return !per_cpu(cpu_tlbstate.is_lazy, cpu);
 }
 
+enum { FLUSH_OTHER_COUNTER_BASE = __COUNTER__ };
+
+#define CKPT 0
+
+#define ckpt(s) \
+	do { if(CKPT && ob) { \
+		int cnt = __COUNTER__ - FLUSH_OTHER_COUNTER_BASE - 1; \
+		if (cnt == 0) { \
+			ckpts[0] = (struct ckpt_t) { \
+				.clk = get_cycles(), \
+				.t = ktime_get_ns(), \
+				.name = s, \
+			}; \
+		} else { \
+			ckpts[cnt].clk += get_cycles() - ckpts[0].clk; \
+			ckpts[cnt].t += ktime_get_ns() - ckpts[0].t; \
+			ckpts[cnt].name = s; \
+		} \
+	} } while (0)
+
 void native_flush_tlb_others(const struct cpumask *cpumask,
 			     const struct flush_tlb_info *info)
 {
+	extern struct task_struct *in_orbit_call;
+	bool ob = in_orbit_call == current;
+
+	static int tcnt = 0;
+	static struct ckpt_t {
+		cycles_t clk;
+		u64 t;
+		const char *name;
+	} ckpts[32] = { { 0, 0, NULL, }, };
+
+	ckpt("init");
+
 	count_vm_tlb_event(NR_TLB_REMOTE_FLUSH);
+	ckpt("count_vm_tlb_event");
 	if (info->end == TLB_FLUSH_ALL)
 		trace_tlb_flush(TLB_REMOTE_SEND_IPI, TLB_FLUSH_ALL);
 	else
 		trace_tlb_flush(TLB_REMOTE_SEND_IPI,
 				(info->end - info->start) >> PAGE_SHIFT);
+	ckpt("trace");
 
 	if (is_uv_system()) {
 		/*
@@ -698,6 +735,7 @@ void native_flush_tlb_others(const struct cpumask *cpumask,
 					       (void *)info, 1);
 		return;
 	}
+	ckpt("uv_system");
 
 	/*
 	 * If no page tables were freed, we can skip sending IPIs to
@@ -709,13 +747,39 @@ void native_flush_tlb_others(const struct cpumask *cpumask,
 	 * up on the new contents of what used to be page tables, while
 	 * doing a speculative memory access.
 	 */
-	if (info->freed_tables)
+	if (info->freed_tables) {
 		smp_call_function_many(cpumask, flush_tlb_func_remote,
 			       (void *)info, 1);
+		ckpt("on_each_cpu");
+	}
 	else
 		on_each_cpu_cond_mask(tlb_is_not_lazy, flush_tlb_func_remote,
 				(void *)info, 1, GFP_ATOMIC, cpumask);
+
+	if (CKPT && ob) {
+		int i;
+		int total = __COUNTER__ - FLUSH_OTHER_COUNTER_BASE - 1;
+		++tcnt;
+
+		if (tcnt % 10000 == 0) {
+
+		printk("orbit: flush other avg %llu ns, %llu cycles\n",
+			ckpts[total - 1].t / tcnt, ckpts[total - 1].clk / tcnt);
+
+		ckpts[0].t = 0;
+		ckpts[0].clk = 0;
+		for (i = 1; i < total; ++i) {
+			printk("CKPT %20s takes: %10llu ns, %10llu cycles\n",
+				ckpts[i].name, (ckpts[i].t - ckpts[i - 1].t) / tcnt,
+				(ckpts[i].clk - ckpts[i - 1].clk) / tcnt);
+		}
+
+		}
+	}
 }
+
+#undef CKPT
+#undef ckpt
 
 /*
  * See Documentation/x86/tlb.rst for details.  We choose 33
@@ -770,6 +834,26 @@ static inline void put_flush_tlb_info(void)
 #endif
 }
 
+enum { COUNTER_BASE = __COUNTER__ };
+
+#define CKPT 0
+
+#define ckpt(s) \
+	do { if(CKPT && ob) { \
+		int cnt = __COUNTER__ - COUNTER_BASE - 1; \
+		if (cnt == 0) { \
+			ckpts[0] = (struct ckpt_t) { \
+				.clk = get_cycles(), \
+				.t = ktime_get_ns(), \
+				.name = s, \
+			}; \
+		} else { \
+			ckpts[cnt].clk += get_cycles() - ckpts[0].clk; \
+			ckpts[cnt].t += ktime_get_ns() - ckpts[0].t; \
+			ckpts[cnt].name = s; \
+		} \
+	} } while (0)
+
 void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
 				unsigned long end, unsigned int stride_shift,
 				bool freed_tables)
@@ -778,7 +862,20 @@ void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
 	u64 new_tlb_gen;
 	int cpu;
 
+	extern struct task_struct *in_orbit_call;
+	bool ob = in_orbit_call == current;
+
+	static int tcnt = 0;
+	static struct ckpt_t {
+		cycles_t clk;
+		u64 t;
+		const char *name;
+	} ckpts[32] = { { 0, 0, NULL, }, };
+
+	ckpt("init");
+
 	cpu = get_cpu();
+	ckpt("get_cpu");
 
 	/* Should we flush just the requested range? */
 	if ((end == TLB_FLUSH_ALL) ||
@@ -789,6 +886,7 @@ void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
 
 	/* This is also a barrier that synchronizes with switch_mm(). */
 	new_tlb_gen = inc_mm_tlb_gen(mm);
+	ckpt("inc_mm_tlb_gen");
 
 	info = get_flush_tlb_info(mm, start, end, stride_shift, freed_tables,
 				  new_tlb_gen);
@@ -799,12 +897,37 @@ void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
 		flush_tlb_func_local(info, TLB_LOCAL_MM_SHOOTDOWN);
 		local_irq_enable();
 	}
+	ckpt("flush_local");
 
 	if (cpumask_any_but(mm_cpumask(mm), cpu) < nr_cpu_ids)
 		flush_tlb_others(mm_cpumask(mm), info);
+	ckpt("flush_others");
 
 	put_flush_tlb_info();
+	ckpt("put_flush_tlb_info");
 	put_cpu();
+	ckpt("put_cpu");
+
+	if (CKPT && ob) {
+		int i;
+		int total = __COUNTER__ - COUNTER_BASE - 1;
+		++tcnt;
+
+		if (tcnt % 10000 == 0) {
+
+		printk("orbit: flush range avg %llu ns, %llu cycles\n",
+			ckpts[total - 1].t / tcnt, ckpts[total - 1].clk / tcnt);
+
+		ckpts[0].t = 0;
+		ckpts[0].clk = 0;
+		for (i = 1; i < total; ++i) {
+			printk("CKPT %20s takes: %10llu ns, %10llu cycles\n",
+				ckpts[i].name, (ckpts[i].t - ckpts[i - 1].t) / tcnt,
+				(ckpts[i].clk - ckpts[i - 1].clk) / tcnt);
+		}
+
+		}
+	}
 }
 
 

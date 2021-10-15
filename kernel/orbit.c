@@ -323,6 +323,8 @@ enum { COUNTER_BASE = __COUNTER__ };
 		} \
 	} } while (0)
 
+struct task_struct *in_orbit_call = NULL;
+
 /* FIXME: Currently we send a task to the orbit, and let the orbit child to
  * create a snapshot actively. When should the snapshot timepoint happen?
  * Should it be right after the orbit call? If so, we may need to wait for the
@@ -409,7 +411,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 				pool->data = NULL;
 				continue;
 			}
-			ckpt("before-vmalloc");
+			ckpt("before-buf-alloc");
 			pool->data = vmalloc(pool_size);
 			if (pool->data) {
 				orb_dbg("Orbit allocated %ld\n", pool_size);
@@ -440,18 +442,22 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 		} else if (0 && list_empty(&info->task_list)) {
 			/* FIXME: we need ob lock */
 			ob_vma = find_vma(ob->mm, pool->start);
+			in_orbit_call = current;
 			ret = update_page_range(ob->mm, parent->mm, ob_vma,
 						parent_vma, pool->start,
 						pool->end,
 						ORBIT_UPDATE_SNAPSHOT, NULL);
+			in_orbit_call = NULL;
 		} else {
 			/* TODO: ORBIT_MOVE */
 			ckpt("begin-cow");
+			in_orbit_call = current;
 			ret = update_page_range(NULL, parent->mm, NULL,
 						parent_vma, pool->start,
 						pool->end, ORBIT_UPDATE_MARK,
 						&pool->snapshot);
 			ckpt("end-cow");
+			in_orbit_call = NULL;
 		}
 	}
 #else

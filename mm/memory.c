@@ -5754,6 +5754,8 @@ enum { COUNTER_BASE = __COUNTER__ };
 		} \
 	} } while (0)
 
+extern struct task_struct *in_orbit_call;
+
 int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	unsigned long addr, unsigned long end,
@@ -5871,8 +5873,15 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	}
 	ckpt("dst_flush");
 
-	if (src_mm != NULL)
+	if (src_mm != NULL) {
+		if (in_orbit_call == current && addr != end) {
+			static int cnt = 0;
+			cnt++;
+			if (cnt % 1000 == 0)
+				printk("orbit: snapshotting ret=%d\n", ret);
+		}
 		flush_tlb_range(src_vma, addr, end);
+	}
 	ckpt("src_flush");
 
 
