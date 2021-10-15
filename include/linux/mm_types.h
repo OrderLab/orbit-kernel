@@ -148,6 +148,13 @@ struct page {
 			union {
 				struct mm_struct *pt_mm; /* x86 pgds only */
 				atomic_t pt_frag_refcount; /* powerpc */
+				/*
+				 * Used for faster orbit incremental snapshot
+				 * Partition all PTEs in one PMD into
+				 * PMD_BITMAP_BITS subgroups, 1 for modified,
+				 * 0 for clean.
+				 */
+				unsigned long pmd_changed_bitmap;
 			};
 #if ALLOC_SPLIT_PTLOCKS
 			spinlock_t *ptl;
@@ -220,6 +227,38 @@ struct page {
 	int _last_cpupid;
 #endif
 } _struct_page_alignment;
+
+#define PMD_BITMAP_BITS (BITS_PER_BYTE * \
+		sizeof_field(struct page, pmd_changed_bitmap))
+#define PMD_BITMAP_PAGES_PER_BIT (PTRS_PER_PTE / PMD_BITMAP_BITS)
+
+#if 0
+static inline unsigned long pmd_bitmap_index(unsigned long address)
+{
+	return pte_index(address) / PMD_BITMAP_PAGES_PER_BIT;
+}
+
+/* PMD ptl must be held by the caller at this point */
+static inline unsigned long *pmd_bitmap(pmd_t pmd)
+{
+	return &pmd_pgtable(pmd)->pmd_changed_bitmap;
+}
+
+static inline void pmd_bitmap_set(pmd_t pmd, unsigned long address)
+{
+	*pmd_bitmap(pmd) |= BIT(pmd_bitmap_index(address));
+}
+#else
+#define pmd_bitmap_index(address) \
+	(pte_index(address) / PMD_BITMAP_PAGES_PER_BIT)
+
+/* PMD ptl must be held by the caller at this point */
+#define pmd_bitmap(pmd) (&pmd_pgtable(pmd)->pmd_changed_bitmap)
+
+#define pmd_bitmap_set(pmd, address) do { \
+		*pmd_bitmap(pmd) |= BIT(pmd_bitmap_index(address)); \
+	} while (0)
+#endif
 
 static inline atomic_t *compound_mapcount_ptr(struct page *page)
 {
