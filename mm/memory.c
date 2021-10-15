@@ -5388,6 +5388,7 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	struct mmu_notifier_range range;
 	bool is_cow;
 	int ret;
+	unsigned long origaddr = addr;
 
 	/* Variables to free up dst entries */
 	struct mmu_gather tlb;
@@ -5470,12 +5471,12 @@ int update_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		mmu_notifier_invalidate_range_end(&range);
 
 	if (dst_mm != NULL) {
-		flush_tlb_range(dst_vma, addr, end);
-		tlb_finish_mmu(&tlb, addr, end);
+		flush_tlb_range(dst_vma, origaddr, end);
+		tlb_finish_mmu(&tlb, origaddr, end);
 	}
 
 	if (src_mm != NULL)
-		flush_tlb_range(src_vma, addr, end);
+		flush_tlb_range(src_vma, origaddr, end);
 
 	return ret;
 }
