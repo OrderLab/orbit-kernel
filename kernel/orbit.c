@@ -422,6 +422,8 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 		const char *name;
 	} ckpts[32] = { { 0, 0, NULL, }, };
 
+	static int skipped = 0, nonskip = 0;
+
 	static u64 last_ns = 0;
 	if (CKPT && last_ns == 0)
 		last_ns = ktime_get_ns();
@@ -461,9 +463,15 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 			/* Async orbit call 0 means skipped. */
 			/* FIXME: how to receive results? */
 			ret = 0;
+#if CKPT
+			++skipped;
+#endif
 			goto new_task;
 		}
 	}
+#if CKPT
+	++nonskip;
+#endif
 
 	ckpt("create_task");
 
@@ -598,6 +606,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 		};
 		orbit_cancel(&cancel_args);
 	}
+	ckpt("task-cancel");
 
 	/* Allocate taskid; valid taskid starts from 1 */
 	/* TODO: will this overflow? */
@@ -637,6 +646,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 		u64 new_time = ktime_get_ns();
 		printk("orbit_call 100000 times interval %lld ns\n", new_time - last_ns);
 		last_ns = new_time;
+		printk("orbit_call skip times %d/%d\n", skipped, skipped + nonskip);
 
 		printk("orbit_call total %llu ns, %llu cycles\n",
 			ckpts[total - 1].t / tcnt, ckpts[total - 1].clk / tcnt);
