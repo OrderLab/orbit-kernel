@@ -4876,20 +4876,6 @@ void snap_init(struct vma_snapshot *snap)
 	INIT_LIST_HEAD(&snap->list);
 }
 
-void snap_destroy(struct vma_snapshot *snap)
-{
-	struct snap_block *block;
-
-	if (snap->count != 0)
-		panic("Orbit snap apply left %ld", snap->count);
-
-	while (!list_empty(&snap->list)) {
-		block = list_first_entry(&snap->list, struct snap_block, elem);
-		list_del(&block->elem);
-		kfree(block);
-	}
-}
-
 static inline bool snap_empty(struct vma_snapshot *snap)
 {
 	return snap->count == 0;
@@ -4929,11 +4915,33 @@ void snap_pop(struct vma_snapshot *snap)
 	struct snap_block *block;
 	if (snap->count == 0) return;
 	--snap->count;
-	if (++snap->head == ARRSIZE) {
+	++snap->head;
+	if (snap->head == ARRSIZE || snap->count == 0) {
 		block = list_first_entry(&snap->list, struct snap_block, elem);
 		list_del(&block->elem);
 		kfree(block);
+		if (snap->count == 0)
+			snap->tail = 0;
 		snap->head = 0;
+	}
+}
+
+void snap_destroy(struct vma_snapshot *snap)
+{
+	struct snap_entry entry;
+	struct page *page;
+
+	while (!snap_empty(snap)) {
+		entry = *snap_front(snap);
+		snap_pop(snap);
+		/* TODO: We only support mapped anonymous pages */
+		page = pfn_to_page(pte_pfn(entry.ptent));
+		if (unlikely(!page)) {
+			printk("snap destroy: no page found for %lu!\n", pte_val(entry.ptent));
+			continue;
+		}
+		page_remove_rmap(page, false);
+		put_page(page);
 	}
 }
 

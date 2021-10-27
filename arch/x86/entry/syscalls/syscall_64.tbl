@@ -372,6 +372,7 @@
 446	common	orbit_state   __x64_sys_orbit_state
 447	common	orbit_mmap __x64_sys_orbit_mmap
 448	common	orbit_mmap_pair __x64_sys_orbit_mmap_pair
+449	common	orbit_cancel __x64_sys_orbit_cancel
 
 #
 # x32-specific system call numbers start at 512 to avoid cache impact

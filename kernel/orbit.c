@@ -43,17 +43,16 @@
 
 #define internalreturn static long /* __attribute__((always_inline)) */
 
-/* Orbit flags */
-#define ORBIT_ASYNC 1 /* Whether the call is async */
-#define ORBIT_NORETVAL 2 /* Whether we want the return value.
-			    This option is ignored in async. */
-
 #define ARG_SIZE_MAX 1024
 
 __cacheline_aligned DEFINE_RWLOCK(orbitlist_lock);
 
 void snap_init(struct vma_snapshot *snap);
 void snap_destroy(struct vma_snapshot *snap);
+
+static int orbit_cancel(struct orbit_cancel_args *args);
+static bool orbit_skippable(struct orbit_info *info,
+		struct orbit_task *new_task, int flags);
 
 static struct orbit_task *
 orbit_create_task(unsigned long flags, orbit_entry func, void __user *arg,
@@ -80,10 +79,10 @@ orbit_create_task(unsigned long flags, orbit_entry func, void __user *arg,
 	/* process error by default, orbit_return will overwrite this */
 	new_task->retval = -ESRCH;
 	new_task->func = func;
-	new_task->arg = arg;
 	new_task->argsize = argsize;
 	new_task->taskid = 0; /* taskid will be allocated later */
 	new_task->flags = flags;
+	new_task->cancelled = false;
 
 	new_task->npool = npool;
 	/* TODO: check error of get_user */
@@ -99,13 +98,119 @@ orbit_create_task(unsigned long flags, orbit_entry func, void __user *arg,
 
 	// FIXME: npool can be 0 when argsize is > 0
 	if (argsize) {
-		if (copy_from_user(new_task->pools + npool, arg, argsize)) {
+		if (copy_from_user(task_argbuf(new_task), arg, argsize)) {
 			pr_err(PREFIX "failed to copy args for orbit task\n");
 			return NULL;
 		}
 	}
 
 	return new_task;
+}
+
+/* Destroy a task
+ * The task should have already been removed from the list. */
+static void orbit_task_destroy(struct orbit_task *task)
+{
+	struct orbit_pool_snapshot *pool;
+
+	orb_dbg("task_destroy id=%ld\n", task->taskid);
+
+	for (pool = task->pools; pool < task->pools + task->npool; ++pool) {
+		if (pool->start == pool->end)
+			continue;
+		if (pool->data)
+			kfree(pool->data);
+		if (pool->snapshot.count != 0)
+			snap_destroy(&pool->snapshot);
+	}
+
+	kfree(task);
+}
+
+static inline struct orbit_task *
+get_next_task(struct list_head *list, struct orbit_task *task)
+{
+	if (task == NULL) return NULL;
+	do {
+		/* What..??? 1st arg `list` is the element?
+		 * What a horrible naming of Linux kernel list. */
+		if (list_is_last(&task->elem, list))
+			return NULL;
+		task = list_next_entry(task, elem);
+	} while (task->cancelled);
+	return task;
+}
+
+/* Helper task list for loop for not cancelled tasks.
+ * A `tmp` is used incase list entry removal */
+#define task_list_for_non_cancel_from_safe(task, tmp, task_list) \
+	for (tmp = get_next_task(task_list, task); \
+	     task; task = tmp, tmp = get_next_task(task_list, task))
+
+/* ARC increment
+ * This must be called holding info->task_lock */
+static inline void task_get(struct orbit_task *task)
+{
+	refcount_inc(&task->refcount);
+}
+
+/* ARC decrement and release */
+static inline void task_put(struct orbit_task *task, spinlock_t *info_lock)
+{
+	if (refcount_dec_and_lock(&task->refcount, info_lock)) {
+		list_del(&task->elem);
+		spin_unlock(info_lock);
+		orbit_task_destroy(task);
+	}
+}
+
+/* ARC decrement and release
+ * This must be called holding info->task_lock */
+static inline void task_put_locked(struct orbit_task *task)
+{
+	if (refcount_dec_and_test(&task->refcount)) {
+		list_del(&task->elem);
+		orbit_task_destroy(task);
+	}
+}
+
+static void timing_reference(void)
+{
+	cycles_t clk1, clk2, clk3;
+	u64 t1, t2, t3;
+	int i;
+	DEFINE_SPINLOCK(lock);
+
+	printk("size of task = %lu\n", sizeof(struct task_struct));
+
+	printk("unsynchronized_tsc = %d\n", unsynchronized_tsc());
+
+	clk1 = get_cycles();
+	clk2 = get_cycles();
+	clk3 = get_cycles();
+
+	printk("clk takes %lld %lld cycles", clk2 - clk1, clk3 - clk1);
+
+	t1 = ktime_get_ns();
+	t2 = ktime_get_ns();
+	t3 = ktime_get_ns();
+
+	printk("ktime takes %lld %lld ns", t2 - t1, t3 - t1);
+
+	clk2 = clk3 = 0;
+
+	for (i = 0; i < 10; ++i) {
+		clk1 = get_cycles();
+		spin_lock(&lock);
+		clk2 += get_cycles() - clk1;
+
+		clk1 = get_cycles();
+		spin_unlock(&lock);
+		clk3 += get_cycles() - clk1;
+	}
+
+	printk("avg cycles for spin lock: %lld\n", clk2 / 10);
+	printk("avg cycles for spin unlock: %lld\n", clk3 / 10);
 }
 
 SYSCALL_DEFINE5(orbit_create, const char __user *, name, void __user *, argbuf,
@@ -170,6 +275,7 @@ struct orbit_info *orbit_create_info(const char __user *name,
 	sema_init(&info->sem, 0);
 	sema_init(&info->exit_sem, 0);
 	spin_lock_init(&info->task_lock);
+	info->snap_active = false;
 	info->current_task = info->next_task = NULL;
 	info->argbuf = argbuf;
 	info->funcptr = funcptr;
@@ -188,8 +294,7 @@ struct orbit_info *orbit_create_info(const char __user *name,
 bool signal_orbit_exit(struct task_struct *ob)
 {
 	struct orbit_info *info;
-	struct list_head *iter;
-	struct orbit_task *task;
+	struct orbit_task *task, *next_task;
 
 	if (!(ob && ob->is_orbit && ob->orbit_info))
 		return false;
@@ -212,12 +317,14 @@ bool signal_orbit_exit(struct task_struct *ob)
 	up(&info->sem);
 	up(&info->exit_sem);
 	spin_lock(&info->task_lock);
-	list_for_each (iter, &info->task_list) {
-		task = list_entry(iter, struct orbit_task, elem);
+	task = info->current_task ? info->current_task : info->next_task;
+	task_list_for_non_cancel_from_safe (task, next_task, &info->task_list) {
+		task->cancelled = true;
 		// release all task update's lock and semaphore
 		mutex_unlock(&task->updates_lock);
 		up(&task->updates_sem);
 		up(&task->finish);
+		task_put_locked(task);
 	}
 	spin_unlock(&info->task_lock);
 	pr_info(PREFIX "orbit %d's locks and semaphores released\n", info->gobid);
@@ -273,11 +380,13 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 				   size_t argsize)
 {
 	struct task_struct *ob, *parent;
-	struct vm_area_struct *ob_vma, *parent_vma;
+	struct vm_area_struct *parent_vma;
 	struct orbit_info *info;
 	struct orbit_task *new_task;
+	struct orbit_cancel_args cancel_args;
 	unsigned long ret, taskid;
 	size_t i;
+	bool active_held = false;
 
 	/* TODO: allow orbit to determine maximum acceptable arg buf size */
 	if (argsize >= ARG_SIZE_MAX)
@@ -295,6 +404,26 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 	new_task = orbit_create_task(flags, func, arg, argsize, npool, pools);
 	if (new_task == NULL)
 		return -ENOMEM;
+	if (flags & (ORBIT_SKIP_SAME_ARG | ORBIT_SKIP_ANY)) {
+		bool skippable;
+
+		/* FIXME: Now only supports async. We may wait for finish
+		 * for sync tasks. In that case, we will need to `up` when
+		 * one receiver finished. */
+		if (unlikely(!(flags & ORBIT_ASYNC)))
+			panic("orbit: skip sync task not implemented yet!\n");
+
+		spin_lock(&info->task_lock);
+		skippable = orbit_skippable(info, new_task,
+				flags & (ORBIT_SKIP_SAME_ARG | ORBIT_SKIP_ANY));
+		spin_unlock(&info->task_lock);
+		if (skippable) {
+			/* Async orbit call 0 means skipped. */
+			/* FIXME: how to receive results? */
+			ret = 0;
+			goto new_task;
+		}
+	}
 
 	orb_dbg("arg = %p, new_task->arg = %p\n", arg, new_task->arg);
 
@@ -345,20 +474,36 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 			orb_dbg("copied\n");
 			if (down_read_killable(&parent->mm->mmap_sem))
 				panic("down failed");
-		} else if (list_empty(&info->task_list)) {
-			/* We probably don't need ob's mmap_sem since
-			 * there is no task running. */
-			ob_vma = find_vma(ob->mm, pool->start);
-			ret = update_page_range(ob->mm, parent->mm, ob_vma,
-						parent_vma, pool->start,
-						pool->end,
-						ORBIT_UPDATE_SNAPSHOT, NULL);
 		} else {
 			/* TODO: ORBIT_MOVE */
-			ret = update_page_range(NULL, parent->mm, NULL,
+			enum update_mode mode;
+			struct mm_struct *ob_mm = NULL;
+			struct vm_area_struct *ob_vma = NULL;
+			struct vma_snapshot *snap = NULL;
+
+			if (!active_held) {
+				spin_lock(&info->task_lock);
+				if (list_empty(&info->task_list) &&
+					!info->snap_active) {
+					info->snap_active = active_held = true;
+				}
+				spin_unlock(&info->task_lock);
+			}
+
+			if (active_held) {
+				/* We probably don't need ob's mmap_sem since
+				 * there is no task running. */
+				mode = ORBIT_UPDATE_SNAPSHOT;
+				ob_mm = ob->mm;
+				ob_vma = find_vma(ob->mm, pool->start);
+			} else {
+				mode = ORBIT_UPDATE_MARK;
+				snap = &pool->snapshot;
+			}
+
+			ret = update_page_range(ob_mm, parent->mm, ob_vma,
 						parent_vma, pool->start,
-						pool->end, ORBIT_UPDATE_MARK,
-						&pool->snapshot);
+						pool->end, mode, snap);
 		}
 	}
 
@@ -368,13 +513,47 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 	/* Add task to the queue */
 	/* TODO: make killable? */
 	spin_lock(&info->task_lock);
+	if (active_held)
+		info->snap_active = false;
+
+	if (flags & ORBIT_CANCEL_SAME_ARG) {
+		cancel_args = (struct orbit_cancel_args) {
+			.info = info,
+			.kind = ORBIT_CANCEL_ARGS,
+			.arg = task_argbuf(new_task),
+			.argsize = new_task->argsize,
+		};
+		orbit_cancel(&cancel_args);
+	} else if (flags & ORBIT_CANCEL_ANY) {
+		cancel_args = (struct orbit_cancel_args) {
+			.info = info,
+			.kind = ORBIT_CANCEL_KIND_ANY,
+		};
+		orbit_cancel(&cancel_args);
+	}
 
 	/* Allocate taskid; valid taskid starts from 1 */
 	/* TODO: will this overflow? */
 	taskid = new_task->taskid = ++info->taskid_counter;
 	list_add_tail(&new_task->elem, &info->task_list);
+
+	/* Count for orbit task to finish.
+	 * Orbit side will not call task_get, but will task_put when finish. */
+	task_get(new_task);
+	/* For synchronous, we will be the waiter, so we hold the ARC.
+	 * For asynchronous, we increment the refcount for updates as a whole,
+	 * and recv will decrement the refcount when all updates has been
+	 * retrieved. If we have ORBIT_NORETVAL, that means no update is
+	 * needed, don't add refcount. In this case, finish will clean up
+	 * the task.
+	 * Note that this second task_get is intentional. */
+	if (!(flags & ORBIT_ASYNC) || !(flags & ORBIT_NORETVAL))
+		task_get(new_task);
+
 	if (info->next_task == NULL)
 		info->next_task = new_task;
+	orb_dbg("task_next new id=%ld\n", info->next_task ? info->next_task->taskid : -1);
+
 	spin_unlock(&info->task_lock);
 	up(&info->sem);
 
@@ -385,8 +564,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 	down(&new_task->finish); /* TODO: make killable? */
 	ret = new_task->retval;
 
-	/* free_task: */
-	kfree(new_task);
+	task_put(new_task, &info->task_lock);
 	return ret;
 
 bad_orbit_call_cleanup:
@@ -395,6 +573,7 @@ bad_orbit_call_cleanup:
 		if (pool->mode != ORBIT_COPY && pool->data)
 			kfree(pool->data);
 	}
+new_task:
 	kfree(new_task);
 	return ret;
 }
@@ -408,6 +587,134 @@ SYSCALL_DEFINE1(orbit_call, struct orbit_call_args __user *, uargs)
 
 	return orbit_call_internal(args.flags, args.gobid,
 		args.npool, args.pools, args.func, args.arg, args.argsize);
+}
+
+/* Check whether the new task can be skipped.
+ * This function must be called with info->lock held. */
+static bool orbit_skippable(struct orbit_info *info,
+		struct orbit_task *new_task, int flags)
+{
+	struct orbit_task *task, *tmp_task;
+
+	/* TODO: Should we loop from the current task, or include finished
+	 * tasks?  Current implementation: from the current task. */
+	task = info->current_task ? info->current_task : info->next_task;
+	task_list_for_non_cancel_from_safe (task, tmp_task, &info->task_list) {
+		if ((flags & ORBIT_SKIP_ANY) ||
+		    ((flags & ORBIT_SKIP_SAME_ARG) &&
+		     task->argsize == new_task->argsize &&
+		     !memcmp(task_argbuf(task), task_argbuf(new_task), task->argsize)))
+		{
+			return true;
+		} else {
+			/* For future extension */
+		}
+	}
+
+	return false;
+}
+
+/* Kernel internal function to cancel an orbit task.
+ * This function must be called with info->lock held.
+ * If cancel was successful, return 1, otherwise return 0. */
+static int orbit_cancel(struct orbit_cancel_args *args)
+{
+	struct orbit_info *info = args->info;
+	struct orbit_task *task, *tmp_task;
+	bool found = false;
+	int downed;
+
+	/* Loop from the next task. We will not the cancel running task.
+	 * This is required, otherwise the loop will do cancel on finished
+	 * tasks, and that will cause issues like refcount underflow. */
+	task = info->next_task;
+	task_list_for_non_cancel_from_safe (task, tmp_task, &info->task_list) {
+		if ((task->flags & ORBIT_CANCELLABLE) &&
+		    ((args->kind == ORBIT_CANCEL_TASKID &&
+		      task->taskid == args->taskid) ||
+		     (args->kind == ORBIT_CANCEL_ARGS &&
+		      args->argsize == task->argsize &&
+		      !memcmp(task_argbuf(task), args->arg, args->argsize)) ||
+		     args->kind == ORBIT_CANCEL_KIND_ANY))
+		{
+			found = true;
+			break;
+		} else {
+			/* For future extension */
+		}
+	}
+
+	/* TODO: Should we return EINVAL if it has exited.
+	 * We probably should distinct not found from other invalid args. */
+	if (!found)
+		return 0;
+	orb_dbg("orbit: cancelling task %ld\n", task->taskid);
+
+	task->cancelled = true;
+	if (info->next_task == task)
+		info->next_task = get_next_task(&info->task_list, task);
+	orb_dbg("task_next cancel id=%ld\n", info->next_task ? info->next_task->taskid : -1);
+
+	up(&task->finish);
+	up(&task->updates_sem);
+	/* We cannot definitively decrement the semaphore for the number of
+	 * available tasks in the queue. Otherwise if orbit_return down first,
+	 * we will hang indefinitely here. Therefore we do a best effort to
+	 * down 1, otherwise down 0. Orbit side will see spurious wakeups, so
+	 * also do a check there. */
+	downed = down_trylock(&info->sem);
+
+	/* Decrement on behalf of orbit_return */
+	task_put_locked(task);
+
+	return 1;
+}
+
+#define STACK_ARG_LIMIT 256
+
+SYSCALL_DEFINE1(orbit_cancel, struct orbit_cancel_user_args __user *, _uargs)
+{
+	struct orbit_cancel_args args;
+	struct orbit_cancel_user_args uargs;
+	char buf_stack[STACK_ARG_LIMIT];
+	char *buf = NULL;
+	struct orbit_info *info = NULL;
+	int ret;
+
+	if (copy_from_user(&uargs, _uargs, sizeof(struct orbit_cancel_user_args)))
+		return -EINVAL;
+
+	args.info = info = find_orbit_by_gobid(uargs.gobid, NULL);
+	if (info == NULL)
+		return -EINVAL;
+	args.kind = uargs.kind;
+
+	if (uargs.kind == ORBIT_CANCEL_ARGS) {
+		buf = uargs.argsize > STACK_ARG_LIMIT
+			? kmalloc(uargs.argsize, GFP_KERNEL)
+			: buf_stack;
+		if (!buf) return -ENOMEM;
+		if (copy_from_user(buf, uargs.arg, uargs.argsize)) {
+			goto inval;
+		}
+		args.arg = buf;
+		args.argsize = uargs.argsize;
+	} else if (uargs.kind == ORBIT_CANCEL_TASKID) {
+		args.taskid = uargs.taskid;
+	} else {
+		return -EINVAL;
+	}
+
+	spin_lock(&info->task_lock);
+	ret = orbit_cancel(&args);
+	spin_unlock(&info->task_lock);
+	goto exit;
+inval:
+	ret = -EINVAL;
+exit:
+	if (buf != NULL && buf != buf_stack)
+		kfree(buf);
+	return ret;
 }
 
 SYSCALL_DEFINE1(orbit_destroy, obid_t, gobid)
@@ -570,7 +877,6 @@ orbit_send_internal(const struct orbit_update_user __user *update)
 #endif
 
 	mutex_lock(&current_task->updates_lock);
-	refcount_inc(&current_task->refcount);
 	list_add_tail(&new_update->elem, &current_task->updates);
 	mutex_unlock(&current_task->updates_lock);
 	up(&current_task->updates_sem);
@@ -592,6 +898,7 @@ internalreturn orbit_recv_internal(obid_t gobid, unsigned long taskid,
 	struct orbit_update *update;
 	struct list_head *iter;
 	int found = 0;
+	int ret = 0;
 
 	info = find_orbit_by_gobid(gobid, NULL);
 	if (info == NULL) {
@@ -605,6 +912,7 @@ internalreturn orbit_recv_internal(obid_t gobid, unsigned long taskid,
 		task = list_entry(iter, struct orbit_task, elem);
 		if (task->taskid == taskid) {
 			found = 1;
+			task_get(task);
 			break;
 		}
 	}
@@ -617,7 +925,7 @@ internalreturn orbit_recv_internal(obid_t gobid, unsigned long taskid,
 
 	/* This syscall is only available for async mode tasks. */
 	if (!(task->flags & ORBIT_ASYNC))
-		return -EINVAL;
+		goto inval;
 
 	/* Now get one of the updates */
 	/* FIXME: wake up this */
@@ -643,14 +951,12 @@ internalreturn orbit_recv_internal(obid_t gobid, unsigned long taskid,
 
 	kfree(update);
 
-	/* ARC free task object */
-	if (refcount_dec_and_test(&task->refcount) &&
-	    down_trylock(&task->finish) == 0) {
-		list_del(&task->elem);
-		kfree(task);
-	}
-
-	return 0;
+	goto exit;
+inval:
+	ret = -EINVAL;
+exit:
+	task_put(task, &info->task_lock);
+	return ret;
 }
 
 SYSCALL_DEFINE3(orbit_recv, obid_t, gobid, unsigned long, taskid,
@@ -702,31 +1008,13 @@ internalreturn orbit_return_internal(unsigned long retval)
 		spin_lock(&info->task_lock);
 		orb_dbg("orbit return locked\n");
 
-		info->next_task = list_is_last(&task->elem, &info->task_list) ?
-					  NULL :
-					  list_next_entry(task, elem);
+		info->current_task = NULL;
 
-		if (task->flags & ORBIT_ASYNC) {
-			/* If the user does not want output,
-			 * dec refcount and try to cleanup.
-			 * Orbit_recv function will also try to cleanup.
-			 */
-			if (task->flags & ORBIT_NORETVAL) {
-				up(&task->finish);
-				if (refcount_read(&task->refcount) == 0 &&
-				    down_trylock(&task->finish) == 0) {
-					list_del(&task->elem);
-					kfree(task);
-				}
-			} else {
-				up(&task->finish);
-				up(&task->updates_sem);
-			}
-		} else {
-			/* Otherwise, orbit_call will wait for down(). */
-			list_del(&task->elem);
-			up(&task->finish);
-		}
+		up(&task->finish);
+		up(&task->updates_sem);
+		orb_dbg("task_sem_up id=%ld sem = %d\n", task->taskid, task->updates_sem.count);
+
+		task_put_locked(task);
 
 		spin_unlock(&info->task_lock);
 		orb_dbg("orbit return unlocked\n");
@@ -735,22 +1023,25 @@ internalreturn orbit_return_internal(unsigned long retval)
 	/* Second half: handle the next task */
 
 	/* 1. Wait for a task to come in */
-	/* TODO: make killable? */
-	orb_dbg("orbit return down\n");
-	if (down_killable(&info->sem)) {
-		pr_info(PREFIX "orbit %d interrupted while waiting for tasks",
-			ob->pid);
-		return -EINTR;
-	}
-	orb_dbg("orbit return downed\n");
-	spin_lock(&info->task_lock);
-	orb_dbg("orbit return locked 2\n");
-	info->current_task = task = info->next_task;
-	info->next_task = list_is_last(&task->elem, &info->task_list) ?
-				  NULL :
-				  list_next_entry(task, elem);
-	spin_unlock(&info->task_lock);
-	orb_dbg("orbit return unlocked 2\n");
+	do {
+		orb_dbg("orbit return down\n");
+		if (down_killable(&info->sem)) {
+			pr_info(PREFIX "orbit %d interrupted while waiting for tasks",
+				ob->pid);
+			return -EINTR;
+		}
+		orb_dbg("orbit return downed\n");
+		spin_lock(&info->task_lock);
+		orb_dbg("orbit return locked 2\n");
+
+		info->current_task = task = info->next_task;
+		info->next_task = get_next_task(&info->task_list, task);
+		orb_dbg("task_current run id=%ld\n", task ? task->taskid : -1);
+		orb_dbg("task_next run id=%ld\n", info->next_task ? info->next_task->taskid : -1);
+
+		spin_unlock(&info->task_lock);
+		orb_dbg("orbit return unlocked 2\n");
+	} while (task == NULL);
 
 	/* if (down_write_killable(&ob->mm->mmap_sem)) { */
 	if (down_read_killable(&ob->mm->mmap_sem)) {
@@ -825,11 +1116,10 @@ internalreturn orbit_return_internal(unsigned long retval)
 	 * syscall. The kernel will copy the arg to kernel space and copy to
 	 * the argbuf upon orbit_return.
 	 */
-	orb_dbg("task->arg = %p, info->argbuf = %p\n", task->arg, info->argbuf);
+	orb_dbg("info->argbuf = %p\n", info->argbuf);
 	orb_dbg("task->func = %p, info->funcptr = %p\n", task->func, info->funcptr);
 	if (task->argsize) {
-		if (copy_to_user(info->argbuf, task->pools + task->npool,
-				 task->argsize))
+		if (copy_to_user(info->argbuf, task_argbuf(task), task->argsize))
 			return -EINVAL;
 	}
 	/* TODO: Clean up or kill? */
@@ -962,7 +1252,6 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 	}
 
 	mutex_lock(&current_task->updates_lock);
-	refcount_inc(&current_task->refcount);
 	list_add_tail(&new_update->elem, &current_task->updates);
 	mutex_unlock(&current_task->updates_lock);
 	up(&current_task->updates_sem);
@@ -1003,6 +1292,7 @@ internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 		task = list_entry(iter, struct orbit_task, elem);
 		if (task->taskid == taskid) {
 			found = 1;
+			task_get(task);
 			break;
 		}
 	}
@@ -1012,17 +1302,18 @@ internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 		printk("warning: orbit list size %d", list_count);
 
 	if (!found) {
-		printk("taskid %lu not found", taskid);
+		orb_dbg("taskid %lu not found", taskid);
 		return -EINVAL;
 	}
 
 	/* This syscall is only available for async mode tasks. */
 	if (!(task->flags & ORBIT_ASYNC))
-		return -EINVAL;
+		goto inval;
 
 	/* Now get one of the updates */
-	/* FIXME: Fix this messy wakeup & cleanup logic */
+	orb_dbg("task_recv_wait id=%ld\n", task->taskid);
 	down(&task->updates_sem);
+	orb_dbg("task_recv_awake id=%ld\n", task->taskid);
 	mutex_lock(&task->updates_lock);
 
 	/* It is a return. */
@@ -1031,9 +1322,13 @@ internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 			ret = -ESRCH;
 		} else {
 			put_user(task->retval, &result->retval);
-			/* TODO: cleanup the task */
 			ret = 0; /* End of updates. */
 		}
+		/* TODO: Let's assume there is only one waiter */
+		/* Try clean up the task since all updates has been
+		 * retrieved. Actual cleanup happens before return.
+		 * Note that this second task_put is intentional. */
+		task_put(task, &info->task_lock);
 	} else {
 		update = list_first_entry(&task->updates, struct orbit_update_v,
 					  elem);
@@ -1045,6 +1340,7 @@ internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 #else
 		if (copy_to_user(&result->scratch, &update->userdata,
 				 sizeof(struct orbit_scratch)))
+			/* FIXME: error handling */
 			return -EINVAL;
 #endif
 		kfree(update);
@@ -1053,16 +1349,11 @@ internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 	}
 	mutex_unlock(&task->updates_lock);
 
-	/* ARC free task object */
-	/* if (ret == 0 && refcount_dec_and_test(&task->refcount) == 1 &&
-		down_trylock(&task->finish) == 0) */
-	if (ret != 1 && down_trylock(&task->finish) == 0) {
-		spin_lock(&info->task_lock);
-		list_del(&task->elem);
-		spin_unlock(&info->task_lock);
-		kfree(task);
-	}
-
+	goto exit;
+inval:
+	ret = -EINVAL;
+exit:
+	task_put(task, &info->task_lock);
 	return ret;
 }
 
