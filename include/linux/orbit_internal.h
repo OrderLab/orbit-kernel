@@ -8,6 +8,17 @@
 #include <linux/list.h>
 #include <linux/refcount.h>
 
+/* Orbit flags */
+#define ORBIT_ASYNC		(1<<0) /* Whether the call is async */
+#define ORBIT_NORETVAL		(1<<1) /* Whether we want the return value.
+					This option is ignored in async. */
+#define ORBIT_CANCELLABLE	(1<<2)
+#define ORBIT_SKIP_SAME_ARG	(1<<3)
+#define ORBIT_SKIP_ANY		(1<<4)
+#define ORBIT_CANCEL_SAME_ARG	(1<<5)
+#define ORBIT_CANCEL_ANY	(1<<6)
+/* #define ORBIT_CANCEL_ALL	(1<<7) */
+
 /* Orbit name max length */
 #define ORBIT_NAME_LEN 24
 
@@ -17,15 +28,23 @@ struct orbit_info {
 
 	struct semaphore sem;
 	struct semaphore exit_sem;
+
 	spinlock_t task_lock;
+	/* The following fields are protected by `task_lock` */
+	bool snap_active; /* One thread is active in direct snapshot */
 	struct list_head task_list; /* orbit_task queue */
 	/* TODO: use lockfree list for tasks and atomic for counter */
 	unsigned long taskid_counter;
 	/* FIXME: This is a hack to get current running task. Ideally we should
 	 * support multiple checker tasks at the same time. */
 	struct orbit_task *current_task;
-	/* Pointer to the next task. NULL when queue is empty. This field will
-	 * be updated when inserting or popping a task into/from the queue. */
+	/* Pointer to the next task.
+	 * This is used because finished task still needs to present in the
+	 * task list, otherwise recv side won't be able to get the result.
+	 * So we cannot directly use the list in the exact same way as a queue.
+	 * NULL when queue is empty. This field will be updated when inserting
+	 * or popping a task into/from the queue. Orbit side will skip
+	 * cancelled tasks. */
 	struct orbit_task *next_task;
 
 	pid_t mpid; /* PID of the attached main program */
@@ -53,15 +72,16 @@ struct orbit_pool_snapshot {
 struct orbit_task {
 	unsigned long taskid; /* valid taskid starts from 1 */
 	unsigned long flags;
+
+	/* The following three fields are protected by `task_lock` */
 	struct list_head elem;
-	/* ARC. Value should be list_size(updates).
-	 * This is currently only used in ORBIT_ASYNC mode. */
-	refcount_t refcount;
+	refcount_t refcount; /* ARC. */
+	bool cancelled;
+
 	/* In non-async mode, orbit_call will wait on this semaphore. */
 	struct semaphore finish;
 
 	orbit_entry func;
-	void __user *arg;
 	size_t argsize;
 	/* Return value to syscall (non-negative are successful return value,
 	 * negative are error codes) */
@@ -81,6 +101,11 @@ struct orbit_task {
 	 * see orbit_create_task. */
 };
 
+static inline void *task_argbuf(struct orbit_task *task)
+{
+	return task->pools + task->npool;
+}
+
 /* FIXME: `start` and `end` should be platform-independent (void __user *)? */
 struct orbit_pool_range {
 	unsigned long start;
@@ -96,6 +121,34 @@ struct orbit_call_args {
 	orbit_entry func;
 	void __user *arg;
 	size_t argsize;
+};
+
+enum orbit_cancel_kind { ORBIT_CANCEL_ARGS, ORBIT_CANCEL_TASKID,
+			 ORBIT_CANCEL_KIND_ANY, };
+/* We have a naming conflict on ORBIT_CANCEL_KIND_ANY and ORBIT_CANCEL_ANY. */
+
+struct orbit_cancel_user_args {
+	obid_t gobid;
+	enum orbit_cancel_kind kind;
+	union {
+		struct {
+			void __user *arg;
+			size_t argsize;
+		};
+		unsigned long taskid;
+	};
+};
+
+struct orbit_cancel_args {
+	struct orbit_info *info;
+	enum orbit_cancel_kind kind;
+	union {
+		struct {
+			void *arg;
+			size_t argsize;
+		};
+		unsigned long taskid;
+	};
 };
 
 #endif /* _ORBIT_INTERNAL_H_ */
