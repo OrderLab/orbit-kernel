@@ -95,6 +95,19 @@ struct page *mem_map;
 EXPORT_SYMBOL(mem_map);
 #endif
 
+#undef DEBUG_INC_SNAP
+
+#ifdef DEBUG_INC_SNAP
+#define dbg_snap(fmt, ...)                                                     \
+	do {                                                                   \
+		printk(KERN_DEBUG "snap: " fmt, ##__VA_ARGS__);                \
+	} while (0)
+#else
+#define dbg_snap(fmt, ...)                                                     \
+	do {                                                                   \
+	} while (0)
+#endif
+
 /*
  * A number of key systems in x86 including ioremap() rely on the assumption
  * that high_memory defines the upper bound on direct map memory, then end
@@ -2476,13 +2489,6 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 		mem_cgroup_commit_charge(new_page, memcg, false, false);
 		lru_cache_add_active_or_unevictable(new_page, vma);
 		/*
-		 * Orbit changes
-		 * Update the pmd modified bitmap
-		 * FIXME: there are a lot more places that can do set_pte,
-		 * add this to those places.
-		 */
-		pmd_bitmap_set(*vmf->pmd, vmf->address);
-		/*
 		 * We call the notify macro here because, when using secondary
 		 * mmu page tables (such as kvm shadow page tables), we want the
 		 * new page to be mapped directly into the secondary page table.
@@ -4086,7 +4092,25 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
 		}
 	}
 
-	return handle_pte_fault(&vmf);
+	ret = handle_pte_fault(&vmf);
+	/*
+	 * Orbit changes: update the pmd modified bitmap
+	 *
+	 * We need to wait for pmd to be initialized, so set bitmap it after
+	 * handle_pte_fault.
+	 *
+	 * FIXME: there are a lot more places that can do set_pte,
+	 * add this to those places.
+	 */
+	vmf.ptl = pte_lockptr(mm, vmf.pmd);
+	pmd_bitmap_set(*vmf.pmd, vmf.address);
+#ifdef DEBUG_INC_SNAP
+	if (vmf.pmd && 0x82UL * 0x40000000UL <= vmf.address &&
+		vmf.address < 0x83UL * 0x40000000UL)
+		dbg_snap("pmd bitmap update to %lx\n", *pmd_bitmap(*vmf.pmd));
+#endif
+	spin_unlock(vmf.ptl);
+	return ret;
 }
 
 /*
@@ -5165,27 +5189,40 @@ again:
 
 	/* Incremental snapshotting */
 	if (mode == ORBIT_UPDATE_SNAPSHOT && !bitmap_inited) {
+		unsigned long first_page;
+
 		src_pmd_bitmap = pmd_bitmap(*src_pmd);
 		dst_pmd_bitmap = pmd_bitmap(*dst_pmd);
-		/* printk("src bitmap: %lx\n", *src_pmd_bitmap); */
-		/* printk("dst bitmap: %lx\n", *dst_pmd_bitmap); */
 		bitmap = *src_pmd_bitmap | *dst_pmd_bitmap;
+		dbg_snap("src bitmap: %lx\n", *src_pmd_bitmap);
+		dbg_snap("dst bitmap: %lx\n", *dst_pmd_bitmap);
+		dbg_snap("bitmap: %lx\n", bitmap);
+
+		/* addr could be not at the first page of PMD, so skip
+		 * pte_index/PAGES_PER_BIT number of bits */
+		bitmap &= ~(BIT(pte_index(addr) / PMD_BITMAP_PAGES_PER_BIT) - 1);
+		dbg_snap("bitmap skipped: %lx\n", bitmap);
+
 		if (bitmap == 0) {
 			spin_unlock(src_ptl);
 			pte_unmap(orig_src_pte);
 			pte_unmap_unlock(orig_dst_pte, dst_ptl);
 			return 0;
 		}
-		/* FIXME: fix for the case when addr does not start from the
-		 * first page of PMD. */
 		lsb = __ffs(bitmap);
 		/* Note that bitmap is the bitmap with cleared lsb */
 		bitmap &= ~BIT(lsb);
-		src_pte += lsb * PMD_BITMAP_PAGES_PER_BIT;
-		dst_pte += lsb * PMD_BITMAP_PAGES_PER_BIT;
-		addr += lsb * PMD_BITMAP_PAGES_PER_BIT * PAGE_SIZE;
+
+		/* addr could be not at the first page of PMD, so skip
+		 * pte_index number of pages */
+		first_page = (unsigned long)max(0L,
+			(long)(lsb * PMD_BITMAP_PAGES_PER_BIT - pte_index(addr)));
+		src_pte += first_page;
+		dst_pte += first_page;
+		addr += first_page * PAGE_SIZE;
 		/* Iterate PMD_BITMAP_PAGES_PER_BIT times for each group */
-		current_bitmap_group = PMD_BITMAP_PAGES_PER_BIT;
+		current_bitmap_group = PMD_BITMAP_PAGES_PER_BIT
+			- pte_index(addr) % PMD_BITMAP_PAGES_PER_BIT;
 		bitmap_inited = true;
 	}
 
@@ -5197,12 +5234,12 @@ again:
 
 	do {
 		if (mode == ORBIT_UPDATE_SNAPSHOT) {
-			/* printk("snap: addr=%lx, lsb=%lx\n", addr, lsb);
-			printk("snap: bitmap=%lx\n", bitmap);
-			printk("snap: src bitmap=%lx\n", *src_pmd_bitmap);
-			printk("snap: dst bitmap=%lx\n", *dst_pmd_bitmap);
-			printk("snap: current_bitmap_group=%lx\n",
-					current_bitmap_group); */
+			dbg_snap("addr=%lx, lsb=%lx\n", addr, lsb);
+			dbg_snap("bitmap=%lx\n", bitmap);
+			dbg_snap("src bitmap=%lx\n", *src_pmd_bitmap);
+			dbg_snap("dst bitmap=%lx\n", *dst_pmd_bitmap);
+			dbg_snap("current_bitmap_group=%lx\n",
+					current_bitmap_group);
 			/* Increment 1 for PMD_BITMAP_PAGES_PER_BIT times, and
 			 * run the other branch when current_bitmap_group is 0.
 			 * We set those values at the beginning of loop
@@ -5211,26 +5248,27 @@ again:
 			if (current_bitmap_group) {
 				next_pte_dist = 1;
 			} else {
+				*src_pmd_bitmap &= ~BIT(lsb);
+				*dst_pmd_bitmap &= ~BIT(lsb);
+				dbg_snap("updated src bitmap=%lx\n", *src_pmd_bitmap);
+				dbg_snap("updated dst bitmap=%lx\n", *dst_pmd_bitmap);
 				if (bitmap == 0) {
 					addr = end;
 					break;
-				} else {
-					*src_pmd_bitmap &= ~BIT(lsb);
-					*dst_pmd_bitmap &= ~BIT(lsb);
-					/* At the end of the group, jump to
-					 * the next group, but since we have
-					 * already added group pages times, we
-					 * are at the end of current group.
-					 * The needed dist of bits is actually
-					 * dist - 1. */
-					next_pte_dist = (__ffs(bitmap) - lsb - 1)
-						* PMD_BITMAP_PAGES_PER_BIT;
-					lsb = __ffs(bitmap);
-					bitmap &= ~BIT(lsb);
-					current_bitmap_group =
-						PMD_BITMAP_PAGES_PER_BIT;
-					continue;
 				}
+				/* At the end of the group, jump to
+				 * the next group, but since we have
+				 * already added group pages times, we
+				 * are at the end of current group.
+				 * The needed dist of bits is actually
+				 * dist - 1. */
+				next_pte_dist = (__ffs(bitmap) - lsb - 1)
+					* PMD_BITMAP_PAGES_PER_BIT;
+				lsb = __ffs(bitmap);
+				bitmap &= ~BIT(lsb);
+				current_bitmap_group =
+					PMD_BITMAP_PAGES_PER_BIT;
+				continue;
 			}
 		} else {
 			next_pte_dist = 1;
