@@ -4795,7 +4795,7 @@ void ptlock_free(struct page *page)
 }
 #endif
 
-
+bool __tlb_remove_page_size_orbit(struct mmu_gather *tlb, struct page *page, int page_size);
 
 /* === Start orbit helper functions === */
 /* The snapshot and zap part is copied and modified from {copy,zap}_page_range */
@@ -4827,6 +4827,7 @@ static unsigned long zap_pte_one_orbit(struct mmu_gather *tlb, int *rss,
 		if (!PageAnon(page)) {
 			if (pte_dirty(ptent)) {
 				force_flush = 1;
+				panic("Force flush 1 at 0x%lx!\n", addr);
 				set_page_dirty(page);
 			}
 			if (pte_young(ptent) &&
@@ -4837,9 +4838,10 @@ static unsigned long zap_pte_one_orbit(struct mmu_gather *tlb, int *rss,
 		page_remove_rmap(page, false);
 		if (unlikely(page_mapcount(page) < 0))
 			print_bad_pte(vma, addr, ptent, page);
-		if (unlikely(__tlb_remove_page(tlb, page))) {
-			/* TODO */
+		if (unlikely(__tlb_remove_page_size_orbit(tlb, page, PAGE_SIZE))) {
+			/* FIXME: Do the actual force flush */
 			force_flush = 1;
+			panic("Force flush 2 at 0x%lx!\n", addr);
 			/* addr += PAGE_SIZE; */
 			return 1;
 		}
@@ -4916,6 +4918,9 @@ void snap_push(struct vma_snapshot *snap, unsigned long addr, pte_t ptent)
 	++snap->count;
 	if (list_empty(&snap->list) || snap->tail == ARRSIZE) {
 		block = kmalloc(sizeof(struct snap_block), GFP_KERNEL);
+		/* TODO: error handling */
+		if (block == NULL)
+			panic("snap: allocation failed!\n");
 		INIT_LIST_HEAD(&block->elem);
 		list_add_tail(&block->elem, &snap->list);
 		snap->tail = 0;
