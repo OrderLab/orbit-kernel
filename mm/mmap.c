@@ -1648,6 +1648,7 @@ SYSCALL_DEFINE5(orbit_mmap_pair, obid_t, gobid, unsigned long, addr, unsigned lo
 	struct mm_struct *orbit_mm;
 	unsigned long pgoff, pglen, main_mmap_addr, orbit_mmap_addr, orbit_flags;
 	LIST_HEAD(uf);
+	vm_flags_t vm_flags = VM_READ | VM_WRITE;
 
 	info = find_orbit_by_gobid(gobid, &orbit);
 	if (info == NULL) {
@@ -1689,7 +1690,7 @@ SYSCALL_DEFINE5(orbit_mmap_pair, obid_t, gobid, unsigned long, addr, unsigned lo
 		// this is the key step to map the address to the same location
 		// in the orbit address space
 		orbit_mmap_addr =
-			mmap_region(NULL, orbit_mmap_addr, pglen, 0, 0, &uf);
+			mmap_region(NULL, orbit_mmap_addr, pglen, vm_flags, 0, &uf);
 	}
 	// reset the mmap_current to NULL to avoid breaking other callers
 	mmap_current = NULL;
