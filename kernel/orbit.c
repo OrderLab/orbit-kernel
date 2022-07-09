@@ -56,14 +56,14 @@ static bool orbit_skippable(struct orbit_info *info,
 
 static struct orbit_task *
 orbit_create_task(unsigned long flags, orbit_entry func, void __user *arg,
-		  size_t argsize, size_t npool,
-		  struct orbit_pool_range __user *pools)
+		  size_t argsize, size_t narea,
+		  struct orbit_area_range __user *areas)
 {
 	struct orbit_task *new_task;
 	size_t i;
 
 	new_task = kmalloc(sizeof(*new_task) + argsize +
-				   npool * sizeof(struct orbit_pool_snapshot),
+				   narea * sizeof(struct orbit_area_snapshot),
 			   GFP_KERNEL);
 	if (new_task == NULL)
 		return NULL;
@@ -84,19 +84,19 @@ orbit_create_task(unsigned long flags, orbit_entry func, void __user *arg,
 	new_task->flags = flags;
 	new_task->cancelled = false;
 
-	new_task->npool = npool;
+	new_task->narea = narea;
 	/* TODO: check error of get_user */
-	for (i = 0; i < npool; ++i) {
-		get_user(new_task->pools[i].start, &pools[i].start);
-		get_user(new_task->pools[i].end, &pools[i].end);
-		get_user(new_task->pools[i].mode, &pools[i].mode);
-		/* Initialize new_task->pools[i].
+	for (i = 0; i < narea; ++i) {
+		get_user(new_task->areas[i].start, &areas[i].start);
+		get_user(new_task->areas[i].end, &areas[i].end);
+		get_user(new_task->areas[i].mode, &areas[i].mode);
+		/* Initialize new_task->areas[i].
 		 * Actual marking is done later in orbit_call. */
-		snap_init(&new_task->pools[i].snapshot);
-		new_task->pools[i].data = NULL;
+		snap_init(&new_task->areas[i].snapshot);
+		new_task->areas[i].data = NULL;
 	}
 
-	// FIXME: npool can be 0 when argsize is > 0
+	// FIXME: narea can be 0 when argsize is > 0
 	if (argsize) {
 		if (copy_from_user(task_argbuf(new_task), arg, argsize)) {
 			pr_err(PREFIX "failed to copy args for orbit task\n");
@@ -111,17 +111,17 @@ orbit_create_task(unsigned long flags, orbit_entry func, void __user *arg,
  * The task should have already been removed from the list. */
 static void orbit_task_destroy(struct orbit_task *task)
 {
-	struct orbit_pool_snapshot *pool;
+	struct orbit_area_snapshot *area;
 
 	orb_dbg("task_destroy id=%ld\n", task->taskid);
 
-	for (pool = task->pools; pool < task->pools + task->npool; ++pool) {
-		if (pool->start == pool->end)
+	for (area = task->areas; area < task->areas + task->narea; ++area) {
+		if (area->start == area->end)
 			continue;
-		if (pool->data)
-			kfree(pool->data);
-		if (pool->snapshot.count != 0)
-			snap_destroy(&pool->snapshot);
+		if (area->data)
+			kfree(area->data);
+		if (area->snapshot.count != 0)
+			snap_destroy(&area->snapshot);
 	}
 
 	kfree(task);
@@ -374,8 +374,8 @@ struct orbit_info *find_orbit_by_gobid(obid_t gobid, struct task_struct **orbit)
 /* Return value: In sync mode, this call returns the checker's return value.
  * In async mode, this returns a taskid integer. */
 internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
-				   size_t npool,
-				   struct orbit_pool_range __user *pools,
+				   size_t narea,
+				   struct orbit_area_range __user *areas,
 				   orbit_entry func, void __user *arg,
 				   size_t argsize)
 {
@@ -401,7 +401,7 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 	orb_dbg("adding to orbit %d's task queue\n", gobid);
 
 	/* 2. Create a orbit task struct and add to the orbit's task queue. */
-	new_task = orbit_create_task(flags, func, arg, argsize, npool, pools);
+	new_task = orbit_create_task(flags, func, arg, argsize, narea, areas);
 	if (new_task == NULL)
 		return -ENOMEM;
 	if (flags & (ORBIT_SKIP_SAME_ARG | ORBIT_SKIP_ANY)) {
@@ -437,38 +437,38 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 		goto bad_orbit_call_cleanup;
 	}
 
-	for (i = 0; i < npool; ++i) {
-		struct orbit_pool_snapshot *pool = new_task->pools + i;
+	for (i = 0; i < narea; ++i) {
+		struct orbit_area_snapshot *area = new_task->areas + i;
 
-		parent_vma = find_vma(parent->mm, pool->start);
+		parent_vma = find_vma(parent->mm, area->start);
 
-		orb_dbg("pool %ld size %ld", i, pool->end - pool->start);
+		orb_dbg("area %ld size %ld", i, area->end - area->start);
 		/* TODO: kernel rules for cow */
-		/* if (pool->end - pool->start <= 8192) { */
-		if (pool->mode == ORBIT_COPY) {
-			size_t pool_size = pool->end - pool->start;
-			if (pool_size == 0) {
-				pool->data = NULL;
+		/* if (area->end - area->start <= 8192) { */
+		if (area->mode == ORBIT_COPY) {
+			size_t area_size = area->end - area->start;
+			if (area_size == 0) {
+				area->data = NULL;
 				continue;
 			}
-			pool->data = kmalloc(pool_size, GFP_KERNEL);
-			if (pool->data) {
-				orb_dbg("Orbit allocated %ld\n", pool_size);
+			area->data = kmalloc(area_size, GFP_KERNEL);
+			if (area->data) {
+				orb_dbg("Orbit allocated %ld\n", area_size);
 			} else {
 				ret = -ENOMEM;
-				pr_err(PREFIX "OOM in orbit pool alloc %ld\n",
-				       pool_size);
+				pr_err(PREFIX "OOM in orbit area alloc %ld\n",
+				       area_size);
 				// up semaphore before cleanup
 				up_read(&parent->mm->mmap_sem);
 				goto bad_orbit_call_cleanup;
 			}
 			up_read(&parent->mm->mmap_sem);
-			if (copy_from_user(pool->data,
-					   (const void __user *)pool->start,
-					   pool_size)) {
+			if (copy_from_user(area->data,
+					   (const void __user *)area->start,
+					   area_size)) {
 				ret = -EINVAL;
 				pr_err(PREFIX
-				       "failed to copy pool data from user\n");
+				       "failed to copy area data from user\n");
 				goto bad_orbit_call_cleanup;
 			}
 			orb_dbg("copied\n");
@@ -495,15 +495,15 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 				 * there is no task running. */
 				mode = ORBIT_UPDATE_SNAPSHOT;
 				ob_mm = ob->mm;
-				ob_vma = find_vma(ob->mm, pool->start);
+				ob_vma = find_vma(ob->mm, area->start);
 			} else {
 				mode = ORBIT_UPDATE_MARK;
-				snap = &pool->snapshot;
+				snap = &area->snapshot;
 			}
 
 			ret = update_page_range(ob_mm, parent->mm, ob_vma,
-						parent_vma, pool->start,
-						pool->end, mode, snap);
+						parent_vma, area->start,
+						area->end, mode, snap);
 		}
 	}
 
@@ -568,10 +568,10 @@ internalreturn orbit_call_internal(unsigned long flags, obid_t gobid,
 	return ret;
 
 bad_orbit_call_cleanup:
-	for (i = 0; i < npool; ++i) {
-		struct orbit_pool_snapshot *pool = new_task->pools + i;
-		if (pool->mode != ORBIT_COPY && pool->data)
-			kfree(pool->data);
+	for (i = 0; i < narea; ++i) {
+		struct orbit_area_snapshot *area = new_task->areas + i;
+		if (area->mode != ORBIT_COPY && area->data)
+			kfree(area->data);
 	}
 new_task:
 	kfree(new_task);
@@ -586,7 +586,7 @@ SYSCALL_DEFINE1(orbit_call, struct orbit_call_args __user *, uargs)
 		return -EINVAL;
 
 	return orbit_call_internal(args.flags, args.gobid,
-		args.npool, args.pools, args.func, args.arg, args.argsize);
+		args.narea, args.areas, args.func, args.arg, args.argsize);
 }
 
 /* Check whether the new task can be skipped.
@@ -818,6 +818,7 @@ SYSCALL_DEFINE2(orbit_state, obid_t, gobid, enum orbit_state *, state)
 #define ORBIT_BUFFER_MAX                                                       \
 	4096 /* Maximum buffer size of orbit_update data field */
 
+#if 0
 struct orbit_update_user {
 	void __user *ptr;
 	size_t length;
@@ -964,6 +965,7 @@ SYSCALL_DEFINE3(orbit_recv, obid_t, gobid, unsigned long, taskid,
 {
 	return orbit_recv_internal(gobid, taskid, update_user);
 }
+#endif
 
 /* This function has two halves:
  * 1) The first half return the result of the last task.
@@ -981,7 +983,7 @@ internalreturn orbit_return_internal(unsigned long retval)
 	struct orbit_info *info;
 	struct orbit_task *task; /* Both old and new task. */
 	struct vm_area_struct *ob_vma;
-	struct orbit_pool_snapshot *pool;
+	struct orbit_area_snapshot *area;
 
 	if (!current->is_orbit) {
 		printk("calling orbit_return on a non-orbit task\n");
@@ -1050,59 +1052,59 @@ internalreturn orbit_return_internal(unsigned long retval)
 	}
 
 	/* 2. Snapshot the page range */
-	for (pool = task->pools; pool < task->pools + task->npool; ++pool) {
+	for (area = task->areas; area < task->areas + task->narea; ++area) {
 		/* FIXME: this should be in a generic logic */
-		if (pool->start == pool->end)
+		if (area->start == area->end)
 			continue;
 		/* TODO: vma return value error handling */
-		ob_vma = find_vma(ob->mm, pool->start);
+		ob_vma = find_vma(ob->mm, area->start);
 		/* vma_interval_tree_iter_first() */
 		/* Currently we assume that the range will only be in one vma */
 		whatis(ob_vma->vm_start);
 		whatis(ob_vma->vm_end);
-		whatis(pool->start);
-		whatis(pool->end);
+		whatis(area->start);
+		whatis(area->end);
 
-		if (!(ob_vma->vm_start <= pool->start &&
-		      pool->end <= ob_vma->vm_end)) {
+		if (!(ob_vma->vm_start <= area->start &&
+		      area->end <= ob_vma->vm_end)) {
 			/* TODO: cleanup  */
 			up_read(&ob->mm->mmap_sem);
 			pr_err(PREFIX
-			       "invalid address range of pool %ld: <vma_start %lx, "
-			       "vma_end %lx> <pool_start %lx, pool_end %lx>",
-			       pool - task->pools, ob_vma->vm_start,
-			       ob_vma->vm_end, pool->start, pool->end);
+			       "invalid address range of area %ld: <vma_start %lx, "
+			       "vma_end %lx> <area_start %lx, area_end %lx>",
+			       area - task->areas, ob_vma->vm_start,
+			       ob_vma->vm_end, area->start, area->end);
 			return -EINVAL;
 		}
 		/* TODO: Update orbit vma list */
 		/* Copy page range */
 
 		/* FIXME: snapshot_share does not work with implicit vma_share */
-		/* if (!(ob_vma->vm_start <= pool->start &&
-			pool->end <= ob_vma->vm_start))
+		/* if (!(ob_vma->vm_start <= area->start &&
+			area->end <= ob_vma->vm_start))
 			snapshot_share(ob->mm, parent->mm, parent_vma); */
 
-		orb_dbg("orbit apply pool %ld %d %ld\n", pool - task->pools,
-		       !!pool->data, pool->snapshot.count);
-		orb_dbg("snapshot pte count is %ld\n", pool->snapshot.count);
-		if (pool->data) {
+		orb_dbg("orbit apply area %ld %d %ld\n", area - task->areas,
+		       !!area->data, area->snapshot.count);
+		orb_dbg("snapshot pte count is %ld\n", area->snapshot.count);
+		if (area->data) {
 			orb_dbg("access_ok %ld\n",
-			       access_ok(pool->start, pool->end - pool->start));
+			       access_ok(area->start, area->end - area->start));
 			/* up_write(&ob->mm->mmap_sem); */
-			if (copy_to_user((void __user *)pool->start, pool->data,
-					 pool->end - pool->start))
+			if (copy_to_user((void __user *)area->start, area->data,
+					 area->end - area->start))
 				pr_err(PREFIX "orbit failed to apply data\n");
 			/* if (down_write_killable(&ob->mm->mmap_sem))
 				panic("down failed"); */
-			kfree(pool->data);
+			kfree(area->data);
 			orb_dbg("orbit apply freed\n");
-			pool->data = NULL;
-		} else if (pool->snapshot.count != 0)
+			area->data = NULL;
+		} else if (area->snapshot.count != 0)
 			update_page_range(ob->mm, NULL, ob_vma, NULL,
-					  pool->start, pool->end,
-					  ORBIT_UPDATE_APPLY, &pool->snapshot);
-		orb_dbg("snapshot pte count left %ld", pool->snapshot.count);
-		snap_destroy(&pool->snapshot);
+					  area->start, area->end,
+					  ORBIT_UPDATE_APPLY, &area->snapshot);
+		orb_dbg("snapshot pte count left %ld", area->snapshot.count);
+		snap_destroy(&area->snapshot);
 	}
 
 	/* up_write(&ob->mm->mmap_sem); */
@@ -1135,6 +1137,8 @@ SYSCALL_DEFINE1(orbit_return, unsigned long, retval)
 	return orbit_return_internal(retval);
 }
 
+#if 0
+
 /* Commit the changes made in the orbit.
  * This is a page-level granularity update.
  * This will automatically find the dirty pages and update back to main program. */
@@ -1145,7 +1149,7 @@ internalreturn do_orbit_commit(void)
 	struct orbit_task *task; /* Both old and new task. */
 	struct vm_area_struct *ob_vma, *parent_vma;
 	int ret;
-	struct orbit_pool_snapshot *pool;
+	struct orbit_area_snapshot *area;
 
 	if (!current->is_orbit)
 		return -EINVAL;
@@ -1156,11 +1160,11 @@ internalreturn do_orbit_commit(void)
 
 	task = info->current_task;
 
-	for (pool = task->pools; pool < task->pools + task->npool; ++pool) {
-		ob_vma = find_vma(ob->mm, pool->start);
-		parent_vma = find_vma(parent->mm, pool->start);
+	for (area = task->areas; area < task->areas + task->narea; ++area) {
+		ob_vma = find_vma(ob->mm, area->start);
+		parent_vma = find_vma(parent->mm, area->start);
 		ret = update_page_range(parent->mm, ob->mm, parent_vma, ob_vma,
-					pool->start, pool->end,
+					area->start, area->end,
 					ORBIT_UPDATE_DIRTY, NULL);
 	}
 
@@ -1171,23 +1175,36 @@ SYSCALL_DEFINE0(orbit_commit)
 {
 	return do_orbit_commit();
 }
+#endif
 
 /* Encoded orbit updates and operations. */
+#if 0
 struct orbit_scratch {
 	void *ptr;
 	size_t cursor;
 	size_t size_limit;
 	size_t count; /* Number of elements */
 };
+#endif
 
-union orbit_result {
+struct orbit_result_kernel {
+	unsigned long retval;
+	void* data_start;
+	size_t data_length;
+	void *updates;	/* actually struct __orbit_block_list* */
+};
+
+#if 0
+union orbit_result_user {
 	unsigned long retval;
 	struct orbit_scratch scratch;
 };
+#endif
 
 struct orbit_update_v {
 	struct list_head elem;
-	struct orbit_scratch userdata;
+	/* struct orbit_scratch userdata; */
+	struct orbit_result_kernel userdata;
 };
 
 static struct orbit_update_v *orbit_create_update_v(void)
@@ -1202,7 +1219,7 @@ static struct orbit_update_v *orbit_create_update_v(void)
 	return new_update;
 }
 
-internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
+internalreturn do_orbit_push(struct orbit_result_kernel __user *s)
 {
 	struct task_struct *ob, *parent;
 	struct orbit_info *info;
@@ -1210,7 +1227,7 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 	struct vm_area_struct *ob_vma, *parent_vma;
 	int ret = 0;
 	struct orbit_update_v *new_update;
-	unsigned long scratch_start, scratch_end;
+	unsigned long update_start, update_end;
 
 	if (!current->is_orbit)
 		return -EINVAL;
@@ -1230,21 +1247,20 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 		return -ENOMEM;
 
 #ifdef DEBUG_COPY_MEMCPY
-	memcpy(&new_update->userdata, s, sizeof(struct orbit_scratch));
+	memcpy(&new_update->userdata, s, sizeof(*s));
 #else
-	if (copy_from_user(&new_update->userdata, s,
-			   sizeof(struct orbit_scratch)))
+	if (copy_from_user(&new_update->userdata, s, sizeof(*s)))
 		return -EINVAL;
 #endif
 
-	scratch_start = (unsigned long)new_update->userdata.ptr;
-	scratch_end = scratch_start + new_update->userdata.size_limit;
+	update_start = (unsigned long)new_update->userdata.data_start;
+	update_end = update_start + new_update->userdata.data_length;
 
 	/* FIXME: synchronization */
-	ob_vma = find_vma(ob->mm, scratch_start);
-	parent_vma = find_vma(parent->mm, scratch_start);
+	ob_vma = find_vma(ob->mm, update_start);
+	parent_vma = find_vma(parent->mm, update_start);
 	ret = update_page_range(parent->mm, ob->mm, parent_vma, ob_vma,
-				scratch_start, scratch_end,
+				update_start, update_end,
 				ORBIT_UPDATE_SNAPSHOT, NULL);
 	if (ret) {
 		kfree(new_update);
@@ -1259,13 +1275,13 @@ internalreturn do_orbit_sendv(struct orbit_scratch __user *s)
 	return 0;
 }
 
-SYSCALL_DEFINE1(orbit_sendv, struct orbit_scratch __user *, s)
+SYSCALL_DEFINE1(orbit_push, struct orbit_result_kernel __user *, s)
 {
-	return do_orbit_sendv(s);
+	return do_orbit_push(s);
 }
 
 /* Returns 1 on success. Returns 0 on end of updates. Returns -ERR on error. */
-internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
+internalreturn do_orbit_pull(struct orbit_result_kernel __user *result, obid_t gobid,
 			      unsigned long taskid)
 {
 	struct task_struct *ob, *parent;
@@ -1335,11 +1351,9 @@ internalreturn do_orbit_recvv(union orbit_result __user *result, obid_t gobid,
 		list_del(&update->elem);
 
 #ifdef DEBUG_COPY_MEMCPY
-		memcpy(&result->scratch, &update->userdata,
-		       sizeof(struct orbit_scratch));
+		memcpy(result, &update->userdata, sizeof(*result));
 #else
-		if (copy_to_user(&result->scratch, &update->userdata,
-				 sizeof(struct orbit_scratch)))
+		if (copy_to_user(result, &update->userdata, sizeof(*result)))
 			/* FIXME: error handling */
 			return -EINVAL;
 #endif
@@ -1357,10 +1371,10 @@ exit:
 	return ret;
 }
 
-SYSCALL_DEFINE3(orbit_recvv, union orbit_result __user *, result, obid_t, gobid,
+SYSCALL_DEFINE3(orbit_pull, struct orbit_result_kernel __user *, result, obid_t, gobid,
 		unsigned long, taskid)
 {
-	return do_orbit_recvv(result, gobid, taskid);
+	return do_orbit_pull(result, gobid, taskid);
 }
 
 internalreturn do_orbit_mmap(unsigned long addr, unsigned long len,

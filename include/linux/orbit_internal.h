@@ -62,9 +62,9 @@ struct vma_snapshot {
 	struct list_head list;
 };
 
-struct orbit_pool_snapshot {
+struct orbit_area_snapshot {
 	unsigned long start, end;
-	enum orbit_pool_mode mode;
+	enum orbit_area_mode mode;
 	struct vma_snapshot snapshot;
 	char *data;
 };
@@ -94,30 +94,30 @@ struct orbit_task {
 	struct list_head updates;
 
 	/* Memory ranges snapshotted. Variable-sized struct. */
-	size_t npool;
-	struct orbit_pool_snapshot pools[];
+	size_t narea;
+	struct orbit_area_snapshot areas[];
 
-	/* Extra field: char arg_data[] starting at (char*)(pools + npool),
+	/* Extra field: char arg_data[] starting at (char*)(areas + narea),
 	 * see orbit_create_task. */
 };
 
 static inline void *task_argbuf(struct orbit_task *task)
 {
-	return task->pools + task->npool;
+	return task->areas + task->narea;
 }
 
 /* FIXME: `start` and `end` should be platform-independent (void __user *)? */
-struct orbit_pool_range {
+struct orbit_area_range {
 	unsigned long start;
 	unsigned long end;
-	enum orbit_pool_mode mode;
+	enum orbit_area_mode mode;
 };
 
 struct orbit_call_args {
 	unsigned long flags;
 	obid_t gobid;
-	size_t npool;
-	struct orbit_pool_range __user *pools;
+	size_t narea;
+	struct orbit_area_range __user *areas;
 	orbit_entry func;
 	void __user *arg;
 	size_t argsize;

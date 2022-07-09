@@ -17,7 +17,7 @@ enum orbit_state {
 
 /* Supported mode of an orbit pool.
  */
-enum orbit_pool_mode {
+enum orbit_area_mode {
 	ORBIT_COW,
 	ORBIT_MOVE,
 	ORBIT_COPY
