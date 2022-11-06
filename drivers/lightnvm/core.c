@@ -236,10 +236,6 @@ err_dev:
 	return tgt_dev;
 }
 
-static const struct block_device_operations nvm_fops = {
-	.owner		= THIS_MODULE,
-};
-
 static struct nvm_tgt_type *__nvm_find_target_type(const char *name)
 {
 	struct nvm_tgt_type *tt;
@@ -380,18 +376,17 @@ static int nvm_create_tgt(struct nvm_dev *dev, struct nvm_ioctl_create *create)
 		goto err_dev;
 	}
 
-	tqueue = blk_alloc_queue_node(GFP_KERNEL, dev->q->node);
+	tqueue = blk_alloc_queue(dev->q->node);
 	if (!tqueue) {
 		ret = -ENOMEM;
 		goto err_disk;
 	}
-	blk_queue_make_request(tqueue, tt->make_rq);
 
 	strlcpy(tdisk->disk_name, create->tgtname, sizeof(tdisk->disk_name));
 	tdisk->flags = GENHD_FL_EXT_DEVT;
 	tdisk->major = 0;
 	tdisk->first_minor = 0;
-	tdisk->fops = &nvm_fops;
+	tdisk->fops = tt->bops;
 	tdisk->queue = tqueue;
 
 	targetdata = tt->init(tgt_dev, tdisk, create->flags);
@@ -849,10 +844,9 @@ static int nvm_bb_chunk_sense(struct nvm_dev *dev, struct ppa_addr ppa)
 	rqd.ppa_addr = generic_to_dev_addr(dev, ppa);
 
 	ret = nvm_submit_io_sync_raw(dev, &rqd);
+	__free_page(page);
 	if (ret)
 		return ret;
-
-	__free_page(page);
 
 	return rqd.error;
 }
@@ -1180,6 +1174,8 @@ int nvm_register(struct nvm_dev *dev)
 {
 	int ret, exp_pool_size;
 
+	pr_warn_once("lightnvm support is deprecated and will be removed in Linux 5.15.\n");
+
 	if (!dev->q || !dev->ops) {
 		kref_put(&dev->ref, nvm_free);
 		return -EINVAL;
@@ -1263,7 +1259,7 @@ static long nvm_ioctl_info(struct file *file, void __user *arg)
 
 	info = memdup_user(arg, sizeof(struct nvm_ioctl_info));
 	if (IS_ERR(info))
-		return -EFAULT;
+		return PTR_ERR(info);
 
 	info->version[0] = NVM_VERSION_MAJOR;
 	info->version[1] = NVM_VERSION_MINOR;

@@ -228,7 +228,7 @@ EXPORT_SYMBOL(__hw_addr_unsync);
  *  @sync: function to call if address should be added
  *  @unsync: function to call if address should be removed
  *
- *  This funciton is intended to be called from the ndo_set_rx_mode
+ *  This function is intended to be called from the ndo_set_rx_mode
  *  function of devices that require explicit address add/remove
  *  notifications.  The unsync function may be NULL in which case
  *  the addresses requiring removal will simply be removed without
@@ -690,6 +690,15 @@ void dev_uc_unsync(struct net_device *to, struct net_device *from)
 	if (to->addr_len != from->addr_len)
 		return;
 
+	/* netif_addr_lock_bh() uses lockdep subclass 0, this is okay for two
+	 * reasons:
+	 * 1) This is always called without any addr_list_lock, so as the
+	 *    outermost one here, it must be 0.
+	 * 2) This is called by some callers after unlinking the upper device,
+	 *    so the dev->lower_level becomes 1 again.
+	 * Therefore, the subclass for 'from' is 0, for 'to' is either 1 or
+	 * larger.
+	 */
 	netif_addr_lock_bh(from);
 	netif_addr_lock(to);
 	__hw_addr_unsync(&to->uc, &from->uc, to->addr_len);
@@ -714,7 +723,7 @@ void dev_uc_flush(struct net_device *dev)
 EXPORT_SYMBOL(dev_uc_flush);
 
 /**
- *	dev_uc_flush - Init unicast address list
+ *	dev_uc_init - Init unicast address list
  *	@dev: device
  *
  *	Init unicast address list.
@@ -911,6 +920,7 @@ void dev_mc_unsync(struct net_device *to, struct net_device *from)
 	if (to->addr_len != from->addr_len)
 		return;
 
+	/* See the above comments inside dev_uc_unsync(). */
 	netif_addr_lock_bh(from);
 	netif_addr_lock(to);
 	__hw_addr_unsync(&to->mc, &from->mc, to->addr_len);

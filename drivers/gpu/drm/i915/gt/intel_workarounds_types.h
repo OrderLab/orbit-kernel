@@ -1,6 +1,5 @@
+/* SPDX-License-Identifier: MIT */
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2014-2018 Intel Corporation
  */
 
@@ -13,8 +12,8 @@
 
 struct i915_wa {
 	i915_reg_t	reg;
-	u32		mask;
-	u32		val;
+	u32		clr;
+	u32		set;
 	u32		read;
 };
 

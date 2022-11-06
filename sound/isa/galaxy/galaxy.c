@@ -247,7 +247,7 @@ static int snd_galaxy_match(struct device *dev, unsigned int n)
 		break;
 	case 2:
 		irq[n] = 9;
-		/* Fall through */
+		fallthrough;
 	case 9:
 		wss_config[n] |= WSS_CONFIG_IRQ_9;
 		break;
@@ -292,7 +292,7 @@ static int snd_galaxy_match(struct device *dev, unsigned int n)
 	case 1:
 		if (dma1[n] == 0)
 			break;
-		/* Fall through */
+		fallthrough;
 	default:
 		dev_err(dev, "invalid capture DMA %d\n", dma2[n]);
 		return 0;
@@ -322,7 +322,7 @@ mpu:
 		break;
 	case 2:
 		mpu_irq[n] = 9;
-		/* Fall through */
+		fallthrough;
 	case 9:
 		config[n] |= GALAXY_CONFIG_MPUIRQ_2;
 		break;
@@ -608,10 +608,9 @@ error:
 	return err;
 }
 
-static int snd_galaxy_remove(struct device *dev, unsigned int n)
+static void snd_galaxy_remove(struct device *dev, unsigned int n)
 {
 	snd_card_free(dev_get_drvdata(dev));
-	return 0;
 }
 
 static struct isa_driver snd_galaxy_driver = {

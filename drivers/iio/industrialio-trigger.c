@@ -50,7 +50,7 @@ static ssize_t iio_trigger_read_name(struct device *dev,
 				     char *buf)
 {
 	struct iio_trigger *trig = to_iio_trigger(dev);
-	return sprintf(buf, "%s\n", trig->name);
+	return sysfs_emit(buf, "%s\n", trig->name);
 }
 
 static DEVICE_ATTR(name, S_IRUGO, iio_trigger_read_name, NULL);
@@ -75,8 +75,7 @@ int __iio_trigger_register(struct iio_trigger *trig_info,
 		return trig_info->id;
 
 	/* Set the name used for the sysfs directory etc */
-	dev_set_name(&trig_info->dev, "trigger%ld",
-		     (unsigned long) trig_info->id);
+	dev_set_name(&trig_info->dev, "trigger%d", trig_info->id);
 
 	ret = device_add(&trig_info->dev);
 	if (ret)
@@ -203,10 +202,8 @@ EXPORT_SYMBOL(iio_trigger_poll_chained);
 void iio_trigger_notify_done(struct iio_trigger *trig)
 {
 	if (atomic_dec_and_test(&trig->use_count) && trig->ops &&
-	    trig->ops->try_reenable)
-		if (trig->ops->try_reenable(trig))
-			/* Missed an interrupt so launch new poll now */
-			iio_trigger_poll(trig);
+	    trig->ops->reenable)
+		trig->ops->reenable(trig);
 }
 EXPORT_SYMBOL(iio_trigger_notify_done);
 
@@ -214,6 +211,7 @@ EXPORT_SYMBOL(iio_trigger_notify_done);
 static int iio_trigger_get_irq(struct iio_trigger *trig)
 {
 	int ret;
+
 	mutex_lock(&trig->pool_lock);
 	ret = bitmap_find_free_region(trig->pool,
 				      CONFIG_IIO_CONSUMERS_PER_TRIGGER,
@@ -239,12 +237,12 @@ static void iio_trigger_put_irq(struct iio_trigger *trig, int irq)
  * the relevant function is in there may be the best option.
  */
 /* Worth protecting against double additions? */
-static int iio_trigger_attach_poll_func(struct iio_trigger *trig,
-					struct iio_poll_func *pf)
+int iio_trigger_attach_poll_func(struct iio_trigger *trig,
+				 struct iio_poll_func *pf)
 {
+	bool notinuse =
+		bitmap_empty(trig->pool, CONFIG_IIO_CONSUMERS_PER_TRIGGER);
 	int ret = 0;
-	bool notinuse
-		= bitmap_empty(trig->pool, CONFIG_IIO_CONSUMERS_PER_TRIGGER);
 
 	/* Prevent the module from being removed whilst attached to a trigger */
 	__module_get(pf->indio_dev->driver_module);
@@ -290,14 +288,13 @@ out_put_module:
 	return ret;
 }
 
-static int iio_trigger_detach_poll_func(struct iio_trigger *trig,
-					 struct iio_poll_func *pf)
+int iio_trigger_detach_poll_func(struct iio_trigger *trig,
+				 struct iio_poll_func *pf)
 {
+	bool no_other_users =
+		bitmap_weight(trig->pool, CONFIG_IIO_CONSUMERS_PER_TRIGGER) == 1;
 	int ret = 0;
-	bool no_other_users
-		= (bitmap_weight(trig->pool,
-				 CONFIG_IIO_CONSUMERS_PER_TRIGGER)
-		   == 1);
+
 	if (trig->ops && trig->ops->set_trigger_state && no_other_users) {
 		ret = trig->ops->set_trigger_state(trig, false);
 		if (ret)
@@ -315,6 +312,7 @@ static int iio_trigger_detach_poll_func(struct iio_trigger *trig,
 irqreturn_t iio_pollfunc_store_time(int irq, void *p)
 {
 	struct iio_poll_func *pf = p;
+
 	pf->timestamp = iio_get_time_ns(pf->indio_dev);
 	return IRQ_WAKE_THREAD;
 }
@@ -377,7 +375,7 @@ static ssize_t iio_trigger_read_current(struct device *dev,
 	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
 
 	if (indio_dev->trig)
-		return sprintf(buf, "%s\n", indio_dev->trig->name);
+		return sysfs_emit(buf, "%s\n", indio_dev->trig->name);
 	return 0;
 }
 
@@ -501,22 +499,23 @@ static const struct device_type iio_trig_type = {
 static void iio_trig_subirqmask(struct irq_data *d)
 {
 	struct irq_chip *chip = irq_data_get_irq_chip(d);
-	struct iio_trigger *trig
-		= container_of(chip,
-			       struct iio_trigger, subirq_chip);
+	struct iio_trigger *trig = container_of(chip, struct iio_trigger, subirq_chip);
+
 	trig->subirqs[d->irq - trig->subirq_base].enabled = false;
 }
 
 static void iio_trig_subirqunmask(struct irq_data *d)
 {
 	struct irq_chip *chip = irq_data_get_irq_chip(d);
-	struct iio_trigger *trig
-		= container_of(chip,
-			       struct iio_trigger, subirq_chip);
+	struct iio_trigger *trig = container_of(chip, struct iio_trigger, subirq_chip);
+
 	trig->subirqs[d->irq - trig->subirq_base].enabled = true;
 }
 
-static struct iio_trigger *viio_trigger_alloc(const char *fmt, va_list vargs)
+static __printf(2, 0)
+struct iio_trigger *viio_trigger_alloc(struct device *parent,
+				       const char *fmt,
+				       va_list vargs)
 {
 	struct iio_trigger *trig;
 	int i;
@@ -525,6 +524,7 @@ static struct iio_trigger *viio_trigger_alloc(const char *fmt, va_list vargs)
 	if (!trig)
 		return NULL;
 
+	trig->dev.parent = parent;
 	trig->dev.type = &iio_trig_type;
 	trig->dev.bus = &iio_bus_type;
 	device_initialize(&trig->dev);
@@ -560,13 +560,23 @@ free_trig:
 	return NULL;
 }
 
-struct iio_trigger *iio_trigger_alloc(const char *fmt, ...)
+/**
+ * iio_trigger_alloc - Allocate a trigger
+ * @parent:		Device to allocate iio_trigger for
+ * @fmt:		trigger name format. If it includes format
+ *			specifiers, the additional arguments following
+ *			format are formatted and inserted in the resulting
+ *			string replacing their respective specifiers.
+ * RETURNS:
+ * Pointer to allocated iio_trigger on success, NULL on failure.
+ */
+struct iio_trigger *iio_trigger_alloc(struct device *parent, const char *fmt, ...)
 {
 	struct iio_trigger *trig;
 	va_list vargs;
 
 	va_start(vargs, fmt);
-	trig = viio_trigger_alloc(fmt, vargs);
+	trig = viio_trigger_alloc(parent, fmt, vargs);
 	va_end(vargs);
 
 	return trig;
@@ -585,37 +595,21 @@ static void devm_iio_trigger_release(struct device *dev, void *res)
 	iio_trigger_free(*(struct iio_trigger **)res);
 }
 
-static int devm_iio_trigger_match(struct device *dev, void *res, void *data)
-{
-	struct iio_trigger **r = res;
-
-	if (!r || !*r) {
-		WARN_ON(!r || !*r);
-		return 0;
-	}
-
-	return *r == data;
-}
-
 /**
  * devm_iio_trigger_alloc - Resource-managed iio_trigger_alloc()
- * @dev:		Device to allocate iio_trigger for
+ * Managed iio_trigger_alloc.  iio_trigger allocated with this function is
+ * automatically freed on driver detach.
+ * @parent:		Device to allocate iio_trigger for
  * @fmt:		trigger name format. If it includes format
  *			specifiers, the additional arguments following
  *			format are formatted and inserted in the resulting
  *			string replacing their respective specifiers.
  *
- * Managed iio_trigger_alloc.  iio_trigger allocated with this function is
- * automatically freed on driver detach.
- *
- * If an iio_trigger allocated with this function needs to be freed separately,
- * devm_iio_trigger_free() must be used.
  *
  * RETURNS:
  * Pointer to allocated iio_trigger on success, NULL on failure.
  */
-struct iio_trigger *devm_iio_trigger_alloc(struct device *dev,
-						const char *fmt, ...)
+struct iio_trigger *devm_iio_trigger_alloc(struct device *parent, const char *fmt, ...)
 {
 	struct iio_trigger **ptr, *trig;
 	va_list vargs;
@@ -627,11 +621,11 @@ struct iio_trigger *devm_iio_trigger_alloc(struct device *dev,
 
 	/* use raw alloc_dr for kmalloc caller tracing */
 	va_start(vargs, fmt);
-	trig = viio_trigger_alloc(fmt, vargs);
+	trig = viio_trigger_alloc(parent, fmt, vargs);
 	va_end(vargs);
 	if (trig) {
 		*ptr = trig;
-		devres_add(dev, ptr);
+		devres_add(parent, ptr);
 	} else {
 		devres_free(ptr);
 	}
@@ -639,23 +633,6 @@ struct iio_trigger *devm_iio_trigger_alloc(struct device *dev,
 	return trig;
 }
 EXPORT_SYMBOL_GPL(devm_iio_trigger_alloc);
-
-/**
- * devm_iio_trigger_free - Resource-managed iio_trigger_free()
- * @dev:		Device this iio_dev belongs to
- * @iio_trig:		the iio_trigger associated with the device
- *
- * Free iio_trigger allocated with devm_iio_trigger_alloc().
- */
-void devm_iio_trigger_free(struct device *dev, struct iio_trigger *iio_trig)
-{
-	int rc;
-
-	rc = devres_release(dev, devm_iio_trigger_release,
-			    devm_iio_trigger_match, iio_trig);
-	WARN_ON(rc);
-}
-EXPORT_SYMBOL_GPL(devm_iio_trigger_free);
 
 static void devm_iio_trigger_unreg(struct device *dev, void *res)
 {
@@ -672,9 +649,6 @@ static void devm_iio_trigger_unreg(struct device *dev, void *res)
  * function is automatically unregistered on driver detach. This function
  * calls iio_trigger_register() internally. Refer to that function for more
  * information.
- *
- * If an iio_trigger registered with this function needs to be unregistered
- * separately, devm_iio_trigger_unregister() must be used.
  *
  * RETURNS:
  * 0 on success, negative error number on failure.
@@ -701,24 +675,6 @@ int __devm_iio_trigger_register(struct device *dev,
 }
 EXPORT_SYMBOL_GPL(__devm_iio_trigger_register);
 
-/**
- * devm_iio_trigger_unregister - Resource-managed iio_trigger_unregister()
- * @dev:	device this iio_trigger belongs to
- * @trig_info:	the trigger associated with the device
- *
- * Unregister trigger registered with devm_iio_trigger_register().
- */
-void devm_iio_trigger_unregister(struct device *dev,
-				 struct iio_trigger *trig_info)
-{
-	int rc;
-
-	rc = devres_release(dev, devm_iio_trigger_unreg, devm_iio_trigger_match,
-			    trig_info);
-	WARN_ON(rc);
-}
-EXPORT_SYMBOL_GPL(devm_iio_trigger_unregister);
-
 bool iio_trigger_using_own(struct iio_dev *indio_dev)
 {
 	return indio_dev->trig->attached_own_device;
@@ -738,7 +694,7 @@ EXPORT_SYMBOL(iio_trigger_using_own);
  * device, -EINVAL otherwise.
  */
 int iio_trigger_validate_own_device(struct iio_trigger *trig,
-	struct iio_dev *indio_dev)
+				    struct iio_dev *indio_dev)
 {
 	if (indio_dev->dev.parent != trig->dev.parent)
 		return -EINVAL;
@@ -746,10 +702,10 @@ int iio_trigger_validate_own_device(struct iio_trigger *trig,
 }
 EXPORT_SYMBOL(iio_trigger_validate_own_device);
 
-void iio_device_register_trigger_consumer(struct iio_dev *indio_dev)
+int iio_device_register_trigger_consumer(struct iio_dev *indio_dev)
 {
-	indio_dev->groups[indio_dev->groupcounter++] =
-		&iio_trigger_consumer_attr_group;
+	return iio_device_register_sysfs_group(indio_dev,
+					       &iio_trigger_consumer_attr_group);
 }
 
 void iio_device_unregister_trigger_consumer(struct iio_dev *indio_dev)
@@ -758,17 +714,3 @@ void iio_device_unregister_trigger_consumer(struct iio_dev *indio_dev)
 	if (indio_dev->trig)
 		iio_trigger_put(indio_dev->trig);
 }
-
-int iio_triggered_buffer_postenable(struct iio_dev *indio_dev)
-{
-	return iio_trigger_attach_poll_func(indio_dev->trig,
-					    indio_dev->pollfunc);
-}
-EXPORT_SYMBOL(iio_triggered_buffer_postenable);
-
-int iio_triggered_buffer_predisable(struct iio_dev *indio_dev)
-{
-	return iio_trigger_detach_poll_func(indio_dev->trig,
-					     indio_dev->pollfunc);
-}
-EXPORT_SYMBOL(iio_triggered_buffer_predisable);

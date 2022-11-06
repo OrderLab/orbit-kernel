@@ -95,13 +95,13 @@ struct ib_sa_port {
 	struct delayed_work ib_cpi_work;
 	spinlock_t                   classport_lock; /* protects class port info set */
 	spinlock_t           ah_lock;
-	u8                   port_num;
+	u32		     port_num;
 };
 
 struct ib_sa_device {
 	int                     start_port, end_port;
 	struct ib_event_handler event_handler;
-	struct ib_sa_port port[0];
+	struct ib_sa_port port[];
 };
 
 struct ib_sa_query {
@@ -174,7 +174,7 @@ static const struct nla_policy ib_nl_policy[LS_NLA_TYPE_MAX] = {
 };
 
 
-static void ib_sa_add_one(struct ib_device *device);
+static int ib_sa_add_one(struct ib_device *device);
 static void ib_sa_remove_one(struct ib_device *device, void *client_data);
 
 static struct ib_client sa_client = {
@@ -190,7 +190,7 @@ static u32 tid;
 
 #define PATH_REC_FIELD(field) \
 	.struct_offset_bytes = offsetof(struct sa_path_rec, field),	\
-	.struct_size_bytes   = sizeof((struct sa_path_rec *)0)->field,	\
+	.struct_size_bytes   = sizeof_field(struct sa_path_rec, field),	\
 	.field_name          = "sa_path_rec:" #field
 
 static const struct ib_field path_rec_table[] = {
@@ -292,7 +292,7 @@ static const struct ib_field path_rec_table[] = {
 	.struct_offset_bytes = \
 		offsetof(struct sa_path_rec, field), \
 	.struct_size_bytes   = \
-		sizeof((struct sa_path_rec *)0)->field,	\
+		sizeof_field(struct sa_path_rec, field),	\
 	.field_name          = "sa_path_rec:" #field
 
 static const struct ib_field opa_path_rec_table[] = {
@@ -420,7 +420,7 @@ static const struct ib_field opa_path_rec_table[] = {
 
 #define MCMEMBER_REC_FIELD(field) \
 	.struct_offset_bytes = offsetof(struct ib_sa_mcmember_rec, field),	\
-	.struct_size_bytes   = sizeof ((struct ib_sa_mcmember_rec *) 0)->field,	\
+	.struct_size_bytes   = sizeof_field(struct ib_sa_mcmember_rec, field),	\
 	.field_name          = "sa_mcmember_rec:" #field
 
 static const struct ib_field mcmember_rec_table[] = {
@@ -504,7 +504,7 @@ static const struct ib_field mcmember_rec_table[] = {
 
 #define SERVICE_REC_FIELD(field) \
 	.struct_offset_bytes = offsetof(struct ib_sa_service_rec, field),	\
-	.struct_size_bytes   = sizeof ((struct ib_sa_service_rec *) 0)->field,	\
+	.struct_size_bytes   = sizeof_field(struct ib_sa_service_rec, field),	\
 	.field_name          = "sa_service_rec:" #field
 
 static const struct ib_field service_rec_table[] = {
@@ -552,7 +552,7 @@ static const struct ib_field service_rec_table[] = {
 
 #define CLASSPORTINFO_REC_FIELD(field) \
 	.struct_offset_bytes = offsetof(struct ib_class_port_info, field),	\
-	.struct_size_bytes   = sizeof((struct ib_class_port_info *)0)->field,	\
+	.struct_size_bytes   = sizeof_field(struct ib_class_port_info, field),	\
 	.field_name          = "ib_class_port_info:" #field
 
 static const struct ib_field ib_classport_info_rec_table[] = {
@@ -630,7 +630,7 @@ static const struct ib_field ib_classport_info_rec_table[] = {
 	.struct_offset_bytes =\
 		offsetof(struct opa_class_port_info, field),	\
 	.struct_size_bytes   = \
-		sizeof((struct opa_class_port_info *)0)->field,	\
+		sizeof_field(struct opa_class_port_info, field),	\
 	.field_name          = "opa_class_port_info:" #field
 
 static const struct ib_field opa_classport_info_rec_table[] = {
@@ -710,7 +710,7 @@ static const struct ib_field opa_classport_info_rec_table[] = {
 
 #define GUIDINFO_REC_FIELD(field) \
 	.struct_offset_bytes = offsetof(struct ib_sa_guidinfo_rec, field),	\
-	.struct_size_bytes   = sizeof((struct ib_sa_guidinfo_rec *) 0)->field,	\
+	.struct_size_bytes   = sizeof_field(struct ib_sa_guidinfo_rec, field),	\
 	.field_name          = "sa_guidinfo_rec:" #field
 
 static const struct ib_field guidinfo_rec_table[] = {
@@ -1194,7 +1194,7 @@ void ib_sa_cancel_query(int id, struct ib_sa_query *query)
 }
 EXPORT_SYMBOL(ib_sa_cancel_query);
 
-static u8 get_src_path_mask(struct ib_device *device, u8 port_num)
+static u8 get_src_path_mask(struct ib_device *device, u32 port_num)
 {
 	struct ib_sa_device *sa_dev;
 	struct ib_sa_port   *port;
@@ -1213,7 +1213,7 @@ static u8 get_src_path_mask(struct ib_device *device, u8 port_num)
 	return src_path_mask;
 }
 
-static int init_ah_attr_grh_fields(struct ib_device *device, u8 port_num,
+static int init_ah_attr_grh_fields(struct ib_device *device, u32 port_num,
 				   struct sa_path_rec *rec,
 				   struct rdma_ah_attr *ah_attr,
 				   const struct ib_gid_attr *gid_attr)
@@ -1242,7 +1242,7 @@ static int init_ah_attr_grh_fields(struct ib_device *device, u8 port_num,
  * @port_num: Port on the specified device.
  * @rec: path record entry to use for ah attributes initialization.
  * @ah_attr: address handle attributes to initialization from path record.
- * @sgid_attr: SGID attribute to consider during initialization.
+ * @gid_attr: SGID attribute to consider during initialization.
  *
  * When ib_init_ah_attr_from_path() returns success,
  * (a) for IB link layer it optionally contains a reference to SGID attribute
@@ -1251,7 +1251,7 @@ static int init_ah_attr_grh_fields(struct ib_device *device, u8 port_num,
  * User must invoke rdma_destroy_ah_attr() to release reference to SGID
  * attributes which are initialized using ib_init_ah_attr_from_path().
  */
-int ib_init_ah_attr_from_path(struct ib_device *device, u8 port_num,
+int ib_init_ah_attr_from_path(struct ib_device *device, u32 port_num,
 			      struct sa_path_rec *rec,
 			      struct rdma_ah_attr *ah_attr,
 			      const struct ib_gid_attr *gid_attr)
@@ -1408,16 +1408,12 @@ void ib_sa_pack_path(struct sa_path_rec *rec, void *attribute)
 EXPORT_SYMBOL(ib_sa_pack_path);
 
 static bool ib_sa_opa_pathrecord_support(struct ib_sa_client *client,
-					 struct ib_device *device,
-					 u8 port_num)
+					 struct ib_sa_device *sa_dev,
+					 u32 port_num)
 {
-	struct ib_sa_device *sa_dev = ib_get_client_data(device, &sa_client);
 	struct ib_sa_port *port;
 	unsigned long flags;
 	bool ret = false;
-
-	if (!sa_dev)
-		return ret;
 
 	port = &sa_dev->port[port_num - sa_dev->start_port];
 	spin_lock_irqsave(&port->classport_lock, flags);
@@ -1438,16 +1434,17 @@ enum opa_pr_supported {
 	PR_IB_SUPPORTED
 };
 
-/**
- * Check if current PR query can be an OPA query.
+/*
+ * opa_pr_query_possible - Check if current PR query can be an OPA query.
+ *
  * Retuns PR_NOT_SUPPORTED if a path record query is not
  * possible, PR_OPA_SUPPORTED if an OPA path record query
  * is possible and PR_IB_SUPPORTED if an IB path record
  * query is possible.
  */
 static int opa_pr_query_possible(struct ib_sa_client *client,
-				 struct ib_device *device,
-				 u8 port_num,
+				 struct ib_sa_device *sa_dev,
+				 struct ib_device *device, u32 port_num,
 				 struct sa_path_rec *rec)
 {
 	struct ib_port_attr port_attr;
@@ -1455,7 +1452,7 @@ static int opa_pr_query_possible(struct ib_sa_client *client,
 	if (ib_query_port(device, port_num, &port_attr))
 		return PR_NOT_SUPPORTED;
 
-	if (ib_sa_opa_pathrecord_support(client, device, port_num))
+	if (ib_sa_opa_pathrecord_support(client, sa_dev, port_num))
 		return PR_OPA_SUPPORTED;
 
 	if (port_attr.lid >= be16_to_cpu(IB_MULTICAST_LID_BASE))
@@ -1536,7 +1533,7 @@ static void ib_sa_path_rec_release(struct ib_sa_query *sa_query)
  * the query.
  */
 int ib_sa_path_rec_get(struct ib_sa_client *client,
-		       struct ib_device *device, u8 port_num,
+		       struct ib_device *device, u32 port_num,
 		       struct sa_path_rec *rec,
 		       ib_sa_comp_mask comp_mask,
 		       unsigned long timeout_ms, gfp_t gfp_mask,
@@ -1570,7 +1567,8 @@ int ib_sa_path_rec_get(struct ib_sa_client *client,
 
 	query->sa_query.port     = port;
 	if (rec->rec_type == SA_PATH_REC_TYPE_OPA) {
-		status = opa_pr_query_possible(client, device, port_num, rec);
+		status = opa_pr_query_possible(client, sa_dev, device, port_num,
+					       rec);
 		if (status == PR_NOT_SUPPORTED) {
 			ret = -EINVAL;
 			goto err1;
@@ -1690,7 +1688,7 @@ static void ib_sa_service_rec_release(struct ib_sa_query *sa_query)
  * the query.
  */
 int ib_sa_service_rec_query(struct ib_sa_client *client,
-			    struct ib_device *device, u8 port_num, u8 method,
+			    struct ib_device *device, u32 port_num, u8 method,
 			    struct ib_sa_service_rec *rec,
 			    ib_sa_comp_mask comp_mask,
 			    unsigned long timeout_ms, gfp_t gfp_mask,
@@ -1786,7 +1784,7 @@ static void ib_sa_mcmember_rec_release(struct ib_sa_query *sa_query)
 }
 
 int ib_sa_mcmember_rec_query(struct ib_sa_client *client,
-			     struct ib_device *device, u8 port_num,
+			     struct ib_device *device, u32 port_num,
 			     u8 method,
 			     struct ib_sa_mcmember_rec *rec,
 			     ib_sa_comp_mask comp_mask,
@@ -1878,7 +1876,7 @@ static void ib_sa_guidinfo_rec_release(struct ib_sa_query *sa_query)
 }
 
 int ib_sa_guid_info_rec_query(struct ib_sa_client *client,
-			      struct ib_device *device, u8 port_num,
+			      struct ib_device *device, u32 port_num,
 			      struct ib_sa_guidinfo_rec *rec,
 			      ib_sa_comp_mask comp_mask, u8 method,
 			      unsigned long timeout_ms, gfp_t gfp_mask,
@@ -1952,30 +1950,6 @@ err1:
 	return ret;
 }
 EXPORT_SYMBOL(ib_sa_guid_info_rec_query);
-
-bool ib_sa_sendonly_fullmem_support(struct ib_sa_client *client,
-				    struct ib_device *device,
-				    u8 port_num)
-{
-	struct ib_sa_device *sa_dev = ib_get_client_data(device, &sa_client);
-	struct ib_sa_port *port;
-	bool ret = false;
-	unsigned long flags;
-
-	if (!sa_dev)
-		return ret;
-
-	port  = &sa_dev->port[port_num - sa_dev->start_port];
-
-	spin_lock_irqsave(&port->classport_lock, flags);
-	if ((port->classport_info.valid) &&
-	    (port->classport_info.data.type == RDMA_CLASS_PORT_INFO_IB))
-		ret = ib_get_cpi_capmask2(&port->classport_info.data.ib)
-			& IB_SA_CAP_MASK2_SENDONLY_FULL_MEM_SUPPORT;
-	spin_unlock_irqrestore(&port->classport_lock, flags);
-	return ret;
-}
-EXPORT_SYMBOL(ib_sa_sendonly_fullmem_support);
 
 struct ib_classport_info_context {
 	struct completion	done;
@@ -2291,7 +2265,7 @@ static void ib_sa_event(struct ib_event_handler *handler,
 		unsigned long flags;
 		struct ib_sa_device *sa_dev =
 			container_of(handler, typeof(*sa_dev), event_handler);
-		u8 port_num = event->element.port_num - sa_dev->start_port;
+		u32 port_num = event->element.port_num - sa_dev->start_port;
 		struct ib_sa_port *port = &sa_dev->port[port_num];
 
 		if (!rdma_cap_ib_sa(handler->device, port->port_num))
@@ -2321,18 +2295,19 @@ static void ib_sa_event(struct ib_event_handler *handler,
 	}
 }
 
-static void ib_sa_add_one(struct ib_device *device)
+static int ib_sa_add_one(struct ib_device *device)
 {
 	struct ib_sa_device *sa_dev;
 	int s, e, i;
 	int count = 0;
+	int ret;
 
 	s = rdma_start_port(device);
 	e = rdma_end_port(device);
 
 	sa_dev = kzalloc(struct_size(sa_dev, port, e - s + 1), GFP_KERNEL);
 	if (!sa_dev)
-		return;
+		return -ENOMEM;
 
 	sa_dev->start_port = s;
 	sa_dev->end_port   = e;
@@ -2352,8 +2327,10 @@ static void ib_sa_add_one(struct ib_device *device)
 			ib_register_mad_agent(device, i + s, IB_QPT_GSI,
 					      NULL, 0, send_handler,
 					      recv_handler, sa_dev, 0);
-		if (IS_ERR(sa_dev->port[i].agent))
+		if (IS_ERR(sa_dev->port[i].agent)) {
+			ret = PTR_ERR(sa_dev->port[i].agent);
 			goto err;
+		}
 
 		INIT_WORK(&sa_dev->port[i].update_task, update_sm_ah);
 		INIT_DELAYED_WORK(&sa_dev->port[i].ib_cpi_work,
@@ -2362,8 +2339,10 @@ static void ib_sa_add_one(struct ib_device *device)
 		count++;
 	}
 
-	if (!count)
+	if (!count) {
+		ret = -EOPNOTSUPP;
 		goto free;
+	}
 
 	ib_set_client_data(device, &sa_client, sa_dev);
 
@@ -2382,7 +2361,7 @@ static void ib_sa_add_one(struct ib_device *device)
 			update_sm_ah(&sa_dev->port[i].update_task);
 	}
 
-	return;
+	return 0;
 
 err:
 	while (--i >= 0) {
@@ -2391,16 +2370,13 @@ err:
 	}
 free:
 	kfree(sa_dev);
-	return;
+	return ret;
 }
 
 static void ib_sa_remove_one(struct ib_device *device, void *client_data)
 {
 	struct ib_sa_device *sa_dev = client_data;
 	int i;
-
-	if (!sa_dev)
-		return;
 
 	ib_unregister_event_handler(&sa_dev->event_handler);
 	flush_workqueue(ib_wq);

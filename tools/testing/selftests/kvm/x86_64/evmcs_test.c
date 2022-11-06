@@ -18,21 +18,51 @@
 #include "vmx.h"
 
 #define VCPU_ID		5
+#define NMI_VECTOR	2
+
+static int ud_count;
+
+void enable_x2apic(void)
+{
+	uint32_t spiv_reg = APIC_BASE_MSR + (APIC_SPIV >> 4);
+
+	wrmsr(MSR_IA32_APICBASE, rdmsr(MSR_IA32_APICBASE) |
+	      MSR_IA32_APICBASE_ENABLE | MSR_IA32_APICBASE_EXTD);
+	wrmsr(spiv_reg, rdmsr(spiv_reg) | APIC_SPIV_APIC_ENABLED);
+}
+
+static void guest_ud_handler(struct ex_regs *regs)
+{
+	ud_count++;
+	regs->rip += 3; /* VMLAUNCH */
+}
+
+static void guest_nmi_handler(struct ex_regs *regs)
+{
+}
 
 void l2_guest_code(void)
 {
-	GUEST_SYNC(6);
-
 	GUEST_SYNC(7);
+
+	GUEST_SYNC(8);
+
+	/* Forced exit to L1 upon restore */
+	GUEST_SYNC(9);
 
 	/* Done, exit to L1 and never come back.  */
 	vmcall();
 }
 
-void l1_guest_code(struct vmx_pages *vmx_pages)
+void guest_code(struct vmx_pages *vmx_pages)
 {
 #define L2_GUEST_STACK_SIZE 64
 	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
+
+	enable_x2apic();
+
+	GUEST_SYNC(1);
+	GUEST_SYNC(2);
 
 	enable_vp_assist(vmx_pages->vp_assist_gpa, vmx_pages->vp_assist);
 
@@ -50,23 +80,45 @@ void l1_guest_code(struct vmx_pages *vmx_pages)
 
 	GUEST_SYNC(5);
 	GUEST_ASSERT(vmptrstz() == vmx_pages->enlightened_vmcs_gpa);
+	current_evmcs->revision_id = -1u;
+	GUEST_ASSERT(vmlaunch());
+	current_evmcs->revision_id = EVMCS_VERSION;
+	GUEST_SYNC(6);
+
+	current_evmcs->pin_based_vm_exec_control |=
+		PIN_BASED_NMI_EXITING;
 	GUEST_ASSERT(!vmlaunch());
 	GUEST_ASSERT(vmptrstz() == vmx_pages->enlightened_vmcs_gpa);
-	GUEST_SYNC(8);
+
+	/*
+	 * NMI forces L2->L1 exit, resuming L2 and hope that EVMCS is
+	 * up-to-date (RIP points where it should and not at the beginning
+	 * of l2_guest_code(). GUEST_SYNC(9) checkes that.
+	 */
 	GUEST_ASSERT(!vmresume());
+
+	GUEST_SYNC(10);
+
 	GUEST_ASSERT(vmreadz(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
-	GUEST_SYNC(9);
+	GUEST_SYNC(11);
+
+	/* Try enlightened vmptrld with an incorrect GPA */
+	evmcs_vmptrld(0xdeadbeef, vmx_pages->enlightened_vmcs);
+	GUEST_ASSERT(vmlaunch());
+	GUEST_ASSERT(ud_count == 1);
+	GUEST_DONE();
 }
 
-void guest_code(struct vmx_pages *vmx_pages)
+void inject_nmi(struct kvm_vm *vm)
 {
-	GUEST_SYNC(1);
-	GUEST_SYNC(2);
+	struct kvm_vcpu_events events;
 
-	if (vmx_pages)
-		l1_guest_code(vmx_pages);
+	vcpu_events_get(vm, VCPU_ID, &events);
 
-	GUEST_DONE();
+	events.nmi.pending = 1;
+	events.flags |= KVM_VCPUEVENT_VALID_NMI_PENDING;
+
+	vcpu_events_set(vm, VCPU_ID, &events);
 }
 
 int main(int argc, char *argv[])
@@ -83,14 +135,14 @@ int main(int argc, char *argv[])
 	/* Create VM */
 	vm = vm_create_default(VCPU_ID, 0, guest_code);
 
-	vcpu_set_cpuid(vm, VCPU_ID, kvm_get_supported_cpuid());
-
-	if (!kvm_check_cap(KVM_CAP_NESTED_STATE) ||
+	if (!nested_vmx_supported() ||
+	    !kvm_check_cap(KVM_CAP_NESTED_STATE) ||
 	    !kvm_check_cap(KVM_CAP_HYPERV_ENLIGHTENED_VMCS)) {
-		printf("capabilities not available, skipping test\n");
+		print_skip("Enlightened VMCS is unsupported");
 		exit(KSFT_SKIP);
 	}
 
+	vcpu_set_hv_cpuid(vm, VCPU_ID);
 	vcpu_enable_evmcs(vm, VCPU_ID);
 
 	run = vcpu_state(vm, VCPU_ID);
@@ -99,6 +151,13 @@ int main(int argc, char *argv[])
 
 	vcpu_alloc_vmx(vm, &vmx_pages_gva);
 	vcpu_args_set(vm, VCPU_ID, 1, vmx_pages_gva);
+
+	vm_init_descriptor_tables(vm);
+	vcpu_init_descriptor_tables(vm, VCPU_ID);
+	vm_handle_exception(vm, UD_VECTOR, guest_ud_handler);
+	vm_handle_exception(vm, NMI_VECTOR, guest_nmi_handler);
+
+	pr_info("Running L1 which uses EVMCS to run L2\n");
 
 	for (stage = 1;; stage++) {
 		_vcpu_run(vm, VCPU_ID);
@@ -109,20 +168,20 @@ int main(int argc, char *argv[])
 
 		switch (get_ucall(vm, VCPU_ID, &uc)) {
 		case UCALL_ABORT:
-			TEST_ASSERT(false, "%s at %s:%d", (const char *)uc.args[0],
-				    __FILE__, uc.args[1]);
+			TEST_FAIL("%s at %s:%ld", (const char *)uc.args[0],
+		      		  __FILE__, uc.args[1]);
 			/* NOT REACHED */
 		case UCALL_SYNC:
 			break;
 		case UCALL_DONE:
 			goto done;
 		default:
-			TEST_ASSERT(false, "Unknown ucall 0x%x.", uc.cmd);
+			TEST_FAIL("Unknown ucall %lu", uc.cmd);
 		}
 
 		/* UCALL_SYNC is handled here.  */
 		TEST_ASSERT(!strcmp((const char *)uc.args[0], "hello") &&
-			    uc.args[1] == stage, "Unexpected register values vmexit #%lx, got %lx",
+			    uc.args[1] == stage, "Stage %d: Unexpected register values vmexit, got %lx",
 			    stage, (ulong)uc.args[1]);
 
 		state = vcpu_save_state(vm, VCPU_ID);
@@ -134,7 +193,7 @@ int main(int argc, char *argv[])
 		/* Restore state in a new VM.  */
 		kvm_vm_restart(vm, O_RDWR);
 		vm_vcpu_add(vm, VCPU_ID);
-		vcpu_set_cpuid(vm, VCPU_ID, kvm_get_supported_cpuid());
+		vcpu_set_hv_cpuid(vm, VCPU_ID);
 		vcpu_enable_evmcs(vm, VCPU_ID);
 		vcpu_load_state(vm, VCPU_ID, state);
 		run = vcpu_state(vm, VCPU_ID);
@@ -145,6 +204,12 @@ int main(int argc, char *argv[])
 		TEST_ASSERT(!memcmp(&regs1, &regs2, sizeof(regs2)),
 			    "Unexpected register values after vcpu_load_state; rdi: %lx rsi: %lx",
 			    (ulong) regs2.rdi, (ulong) regs2.rsi);
+
+		/* Force immediate L2->L1 exit before resuming */
+		if (stage == 8) {
+			pr_info("Injecting NMI into L1 before L2 had a chance to run after restore\n");
+			inject_nmi(vm);
+		}
 	}
 
 done:

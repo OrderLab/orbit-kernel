@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/**
+/*
  * Sensortek STK8312 3-Axis Accelerometer
  *
  * Copyright (c) 2015, Intel Corporation.
@@ -492,8 +492,6 @@ static int stk8312_buffer_postdisable(struct iio_dev *indio_dev)
 
 static const struct iio_buffer_setup_ops stk8312_buffer_setup_ops = {
 	.preenable   = stk8312_buffer_preenable,
-	.postenable  = iio_triggered_buffer_postenable,
-	.predisable  = iio_triggered_buffer_predisable,
 	.postdisable = stk8312_buffer_postdisable,
 };
 
@@ -515,7 +513,6 @@ static int stk8312_probe(struct i2c_client *client,
 	i2c_set_clientdata(client, indio_dev);
 	mutex_init(&data->lock);
 
-	indio_dev->dev.parent = &client->dev;
 	indio_dev->info = &stk8312_info;
 	indio_dev->name = STK8312_DRIVER_NAME;
 	indio_dev->modes = INDIO_DIRECT_MODE;
@@ -561,7 +558,6 @@ static int stk8312_probe(struct i2c_client *client,
 			goto err_power_off;
 		}
 
-		data->dready_trig->dev.parent = &client->dev;
 		data->dready_trig->ops = &stk8312_trigger_ops;
 		iio_trigger_set_drvdata(data->dready_trig, indio_dev);
 		ret = iio_trigger_register(data->dready_trig);

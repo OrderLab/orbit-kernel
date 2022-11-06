@@ -12,6 +12,7 @@ enum stack_type {
 	STACK_TYPE_IRQ,
 	STACK_TYPE_NODAT,
 	STACK_TYPE_RESTART,
+	STACK_TYPE_MCCK,
 };
 
 struct stack_info {
@@ -33,8 +34,8 @@ static inline bool on_stack(struct stack_info *info,
 	return addr >= info->begin && addr + len <= info->end;
 }
 
-static inline unsigned long get_stack_pointer(struct task_struct *task,
-					      struct pt_regs *regs)
+static __always_inline unsigned long get_stack_pointer(struct task_struct *task,
+						       struct pt_regs *regs)
 {
 	if (regs)
 		return (unsigned long) kernel_stack_pointer(regs);
@@ -62,6 +63,17 @@ struct stack_frame {
 };
 #endif
 
+/*
+ * Unlike current_stack_pointer() which simply returns current value of %r15
+ * current_frame_address() returns function stack frame address, which matches
+ * %r15 upon function invocation. It may differ from %r15 later if function
+ * allocates stack for local variables or new stack frame to call other
+ * functions.
+ */
+#define current_frame_address()						\
+	((unsigned long)__builtin_frame_address(0) -			\
+	 offsetof(struct stack_frame, back_chain))
+
 #define CALL_ARGS_0()							\
 	register unsigned long r2 asm("2")
 #define CALL_ARGS_1(arg1)						\
@@ -79,12 +91,16 @@ struct stack_frame {
 	CALL_ARGS_4(arg1, arg2, arg3, arg4);				\
 	register unsigned long r4 asm("6") = (unsigned long)(arg5)
 
-#define CALL_FMT_0 "=&d" (r2) :
-#define CALL_FMT_1 "+&d" (r2) :
-#define CALL_FMT_2 CALL_FMT_1 "d" (r3),
-#define CALL_FMT_3 CALL_FMT_2 "d" (r4),
-#define CALL_FMT_4 CALL_FMT_3 "d" (r5),
-#define CALL_FMT_5 CALL_FMT_4 "d" (r6),
+/*
+ * To keep this simple mark register 2-6 as being changed (volatile)
+ * by the called function, even though register 6 is saved/nonvolatile.
+ */
+#define CALL_FMT_0 "=&d" (r2)
+#define CALL_FMT_1 "+&d" (r2)
+#define CALL_FMT_2 CALL_FMT_1, "+&d" (r3)
+#define CALL_FMT_3 CALL_FMT_2, "+&d" (r4)
+#define CALL_FMT_4 CALL_FMT_3, "+&d" (r5)
+#define CALL_FMT_5 CALL_FMT_4, "+&d" (r6)
 
 #define CALL_CLOBBER_5 "0", "1", "14", "cc", "memory"
 #define CALL_CLOBBER_4 CALL_CLOBBER_5
@@ -95,18 +111,20 @@ struct stack_frame {
 
 #define CALL_ON_STACK(fn, stack, nr, args...)				\
 ({									\
+	unsigned long frame = current_frame_address();			\
 	CALL_ARGS_##nr(args);						\
 	unsigned long prev;						\
 									\
 	asm volatile(							\
 		"	la	%[_prev],0(15)\n"			\
-		"	la	15,0(%[_stack])\n"			\
-		"	stg	%[_prev],%[_bc](15)\n"			\
+		"	lg	15,%[_stack]\n"				\
+		"	stg	%[_frame],%[_bc](15)\n"			\
 		"	brasl	14,%[_fn]\n"				\
 		"	la	15,0(%[_prev])\n"			\
 		: [_prev] "=&a" (prev), CALL_FMT_##nr			\
-		  [_stack] "a" (stack),					\
+		: [_stack] "R" (stack),					\
 		  [_bc] "i" (offsetof(struct stack_frame, back_chain)),	\
+		  [_frame] "d" (frame),					\
 		  [_fn] "X" (fn) : CALL_CLOBBER_##nr);			\
 	r2;								\
 })

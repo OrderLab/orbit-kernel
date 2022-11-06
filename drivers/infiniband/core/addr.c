@@ -76,7 +76,9 @@ static struct workqueue_struct *addr_wq;
 
 static const struct nla_policy ib_nl_addr_policy[LS_NLA_TYPE_MAX] = {
 	[LS_NLA_TYPE_DGID] = {.type = NLA_BINARY,
-		.len = sizeof(struct rdma_nla_ls_gid)},
+		.len = sizeof(struct rdma_nla_ls_gid),
+		.validation_type = NLA_VALIDATE_MIN,
+		.min = sizeof(struct rdma_nla_ls_gid)},
 };
 
 static inline bool ib_nl_is_good_ip_resp(const struct nlmsghdr *nlh)
@@ -370,6 +372,8 @@ static int fetch_ha(const struct dst_entry *dst, struct rdma_dev_addr *dev_addr,
 		(const void *)&dst_in4->sin_addr.s_addr :
 		(const void *)&dst_in6->sin6_addr;
 	sa_family_t family = dst_in->sa_family;
+
+	might_sleep();
 
 	/* If we have a gateway in IB mode then it must be an IB network */
 	if (has_gateway(dst, family) && dev_addr->network == RDMA_NETWORK_IB)
@@ -725,6 +729,8 @@ int roce_resolve_route_from_path(struct sa_path_rec *rec,
 	} sgid, dgid;
 	struct rdma_dev_addr dev_addr = {};
 	int ret;
+
+	might_sleep();
 
 	if (rec->roce.route_resolved)
 		return 0;

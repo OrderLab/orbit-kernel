@@ -648,6 +648,7 @@ static u8 jpu_parse_hdr(void *buffer, unsigned long size, unsigned int *width,
 			if (get_word_be(&jpeg_buffer, &word))
 				return 0;
 			skip(&jpeg_buffer, (long)word - 2);
+			break;
 		case 0:
 			break;
 		default:
@@ -793,7 +794,6 @@ static int __jpu_try_fmt(struct jpu_ctx *ctx, struct jpu_fmt **fmtinfo,
 	pix->colorspace = fmt->colorspace;
 	pix->field = V4L2_FIELD_NONE;
 	pix->num_planes = fmt->num_planes;
-	memset(pix->reserved, 0, sizeof(pix->reserved));
 
 	jpu_bound_align_image(&pix->width, JPU_WIDTH_MIN, JPU_WIDTH_MAX,
 			      fmt->h_align, &pix->height, JPU_HEIGHT_MIN,
@@ -808,8 +808,6 @@ static int __jpu_try_fmt(struct jpu_ctx *ctx, struct jpu_fmt **fmtinfo,
 			pix->plane_fmt[0].sizeimage = JPU_JPEG_HDR_SIZE +
 				(JPU_JPEG_MAX_BYTES_PER_PIXEL * w * h);
 		pix->plane_fmt[0].bytesperline = 0;
-		memset(pix->plane_fmt[0].reserved, 0,
-		       sizeof(pix->plane_fmt[0].reserved));
 	} else {
 		unsigned int i, bpl = 0;
 
@@ -822,8 +820,6 @@ static int __jpu_try_fmt(struct jpu_ctx *ctx, struct jpu_fmt **fmtinfo,
 		for (i = 0; i < pix->num_planes; ++i) {
 			pix->plane_fmt[i].bytesperline = bpl;
 			pix->plane_fmt[i].sizeimage = bpl * h * fmt->bpp[i] / 8;
-			memset(pix->plane_fmt[i].reserved, 0,
-			       sizeof(pix->plane_fmt[i].reserved));
 		}
 	}
 
@@ -1066,7 +1062,7 @@ static int jpu_buf_prepare(struct vb2_buffer *vb)
 		}
 
 		/* decoder capture queue */
-		if (!ctx->encoder && !V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type))
+		if (!ctx->encoder && V4L2_TYPE_IS_CAPTURE(vb->vb2_queue->type))
 			vb2_set_plane_payload(vb, i, size);
 	}
 
@@ -1663,7 +1659,7 @@ static int jpu_probe(struct platform_device *pdev)
 	jpu->vfd_encoder.device_caps	= V4L2_CAP_STREAMING |
 					  V4L2_CAP_VIDEO_M2M_MPLANE;
 
-	ret = video_register_device(&jpu->vfd_encoder, VFL_TYPE_GRABBER, -1);
+	ret = video_register_device(&jpu->vfd_encoder, VFL_TYPE_VIDEO, -1);
 	if (ret) {
 		v4l2_err(&jpu->v4l2_dev, "Failed to register video device\n");
 		goto m2m_init_rollback;
@@ -1682,7 +1678,7 @@ static int jpu_probe(struct platform_device *pdev)
 	jpu->vfd_decoder.device_caps	= V4L2_CAP_STREAMING |
 					  V4L2_CAP_VIDEO_M2M_MPLANE;
 
-	ret = video_register_device(&jpu->vfd_decoder, VFL_TYPE_GRABBER, -1);
+	ret = video_register_device(&jpu->vfd_decoder, VFL_TYPE_VIDEO, -1);
 	if (ret) {
 		v4l2_err(&jpu->v4l2_dev, "Failed to register video device\n");
 		goto enc_vdev_register_rollback;

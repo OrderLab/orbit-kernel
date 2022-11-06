@@ -304,10 +304,15 @@ int probe_file__get_events(int fd, struct strfilter *filter,
 		p = strchr(ent->s, ':');
 		if ((p && strfilter__compare(filter, p + 1)) ||
 		    strfilter__compare(filter, ent->s)) {
-			strlist__add(plist, ent->s);
+			ret = strlist__add(plist, ent->s);
+			if (ret == -ENOMEM) {
+				pr_err("strlist__add failed with -ENOMEM\n");
+				goto out;
+			}
 			ret = 0;
 		}
 	}
+out:
 	strlist__delete(namelist);
 
 	return ret;
@@ -514,7 +519,11 @@ static int probe_cache__load(struct probe_cache *pcache)
 				ret = -EINVAL;
 				goto out;
 			}
-			strlist__add(entry->tevlist, buf);
+			ret = strlist__add(entry->tevlist, buf);
+			if (ret == -ENOMEM) {
+				pr_err("strlist__add failed with -ENOMEM\n");
+				goto out;
+			}
 		}
 	}
 out:
@@ -675,7 +684,12 @@ int probe_cache__add_entry(struct probe_cache *pcache,
 		command = synthesize_probe_trace_command(&tevs[i]);
 		if (!command)
 			goto out_err;
-		strlist__add(entry->tevlist, command);
+		ret = strlist__add(entry->tevlist, command);
+		if (ret == -ENOMEM) {
+			pr_err("strlist__add failed with -ENOMEM\n");
+			goto out_err;
+		}
+
 		free(command);
 	}
 	list_add_tail(&entry->node, &pcache->entries);
@@ -780,6 +794,8 @@ static char *synthesize_sdt_probe_command(struct sdt_note *note,
 	char *ret = NULL;
 	int i, args_count, err;
 	unsigned long long ref_ctr_offset;
+	char *arg;
+	int arg_idx = 0;
 
 	if (strbuf_init(&buf, 32) < 0)
 		return NULL;
@@ -804,11 +820,43 @@ static char *synthesize_sdt_probe_command(struct sdt_note *note,
 		if (args == NULL)
 			goto error;
 
-		for (i = 0; i < args_count; ++i) {
-			if (synthesize_sdt_probe_arg(&buf, i, args[i]) < 0) {
+		for (i = 0; i < args_count; ) {
+			/*
+			 * FIXUP: Arm64 ELF section '.note.stapsdt' uses string
+			 * format "-4@[sp, NUM]" if a probe is to access data in
+			 * the stack, e.g. below is an example for the SDT
+			 * Arguments:
+			 *
+			 *   Arguments: -4@[sp, 12] -4@[sp, 8] -4@[sp, 4]
+			 *
+			 * Since the string introduces an extra space character
+			 * in the middle of square brackets, the argument is
+			 * divided into two items.  Fixup for this case, if an
+			 * item contains sub string "[sp,", need to concatenate
+			 * the two items.
+			 */
+			if (strstr(args[i], "[sp,") && (i+1) < args_count) {
+				err = asprintf(&arg, "%s %s", args[i], args[i+1]);
+				i += 2;
+			} else {
+				err = asprintf(&arg, "%s", args[i]);
+				i += 1;
+			}
+
+			/* Failed to allocate memory */
+			if (err < 0) {
 				argv_free(args);
 				goto error;
 			}
+
+			if (synthesize_sdt_probe_arg(&buf, arg_idx, arg) < 0) {
+				free(arg);
+				argv_free(args);
+				goto error;
+			}
+
+			free(arg);
+			arg_idx++;
 		}
 
 		argv_free(args);
@@ -863,9 +911,15 @@ int probe_cache__scan_sdt(struct probe_cache *pcache, const char *pathname)
 			break;
 		}
 
-		strlist__add(entry->tevlist, buf);
+		ret = strlist__add(entry->tevlist, buf);
+
 		free(buf);
 		entry = NULL;
+
+		if (ret == -ENOMEM) {
+			pr_err("strlist__add failed with -ENOMEM\n");
+			break;
+		}
 	}
 	if (entry) {
 		list_del_init(&entry->node);
@@ -1017,6 +1071,8 @@ enum ftrace_readme {
 	FTRACE_README_KRETPROBE_OFFSET,
 	FTRACE_README_UPROBE_REF_CTR,
 	FTRACE_README_USER_ACCESS,
+	FTRACE_README_MULTIPROBE_EVENT,
+	FTRACE_README_IMMEDIATE_VALUE,
 	FTRACE_README_END,
 };
 
@@ -1029,7 +1085,9 @@ static struct {
 	DEFINE_TYPE(FTRACE_README_PROBE_TYPE_X, "*type: * x8/16/32/64,*"),
 	DEFINE_TYPE(FTRACE_README_KRETPROBE_OFFSET, "*place (kretprobe): *"),
 	DEFINE_TYPE(FTRACE_README_UPROBE_REF_CTR, "*ref_ctr_offset*"),
-	DEFINE_TYPE(FTRACE_README_USER_ACCESS, "*[u]<offset>*"),
+	DEFINE_TYPE(FTRACE_README_USER_ACCESS, "*u]<offset>*"),
+	DEFINE_TYPE(FTRACE_README_MULTIPROBE_EVENT, "*Create/append/*"),
+	DEFINE_TYPE(FTRACE_README_IMMEDIATE_VALUE, "*\\imm-value,*"),
 };
 
 static bool scan_ftrace_readme(enum ftrace_readme type)
@@ -1094,4 +1152,14 @@ bool uprobe_ref_ctr_is_supported(void)
 bool user_access_is_supported(void)
 {
 	return scan_ftrace_readme(FTRACE_README_USER_ACCESS);
+}
+
+bool multiprobe_event_is_supported(void)
+{
+	return scan_ftrace_readme(FTRACE_README_MULTIPROBE_EVENT);
+}
+
+bool immediate_value_is_supported(void)
+{
+	return scan_ftrace_readme(FTRACE_README_IMMEDIATE_VALUE);
 }

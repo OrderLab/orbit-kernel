@@ -38,6 +38,7 @@ int __init i915_global_buddy_init(void)
 	if (!global.slab_blocks)
 		return -ENOMEM;
 
+	i915_global_register(&global.base);
 	return 0;
 }
 
@@ -47,6 +48,8 @@ static struct i915_buddy_block *i915_block_alloc(struct i915_buddy_block *parent
 {
 	struct i915_buddy_block *block;
 
+	GEM_BUG_ON(order > I915_BUDDY_MAX_ORDER);
+
 	block = kmem_cache_zalloc(global.slab_blocks, GFP_KERNEL);
 	if (!block)
 		return NULL;
@@ -55,6 +58,7 @@ static struct i915_buddy_block *i915_block_alloc(struct i915_buddy_block *parent
 	block->header |= order;
 	block->parent = parent;
 
+	GEM_BUG_ON(block->header & I915_BUDDY_HEADER_UNUSED);
 	return block;
 }
 
@@ -261,8 +265,10 @@ void i915_buddy_free_list(struct i915_buddy_mm *mm, struct list_head *objects)
 {
 	struct i915_buddy_block *block, *on;
 
-	list_for_each_entry_safe(block, on, objects, link)
+	list_for_each_entry_safe(block, on, objects, link) {
 		i915_buddy_free(mm, block);
+		cond_resched();
+	}
 	INIT_LIST_HEAD(objects);
 }
 
@@ -309,7 +315,8 @@ i915_buddy_alloc(struct i915_buddy_mm *mm, unsigned int order)
 	return block;
 
 out_free:
-	__i915_buddy_free(mm, block);
+	if (i != order)
+		__i915_buddy_free(mm, block);
 	return ERR_PTR(err);
 }
 

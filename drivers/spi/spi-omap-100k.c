@@ -19,7 +19,6 @@
 #include <linux/err.h>
 #include <linux/clk.h>
 #include <linux/io.h>
-#include <linux/gpio.h>
 #include <linux/slab.h>
 
 #include <linux/spi/spi.h>
@@ -111,7 +110,7 @@ static void spi100k_write_data(struct spi_master *master, int len, int data)
 	}
 
 	spi100k_enable_clock(master);
-	writew(data , spi100k->base + SPI_TX_MSB);
+	writew(data, spi100k->base + SPI_TX_MSB);
 
 	writew(SPI_CTRL_SEN(0) |
 	       SPI_CTRL_WORD_SIZE(len) |
@@ -128,7 +127,7 @@ static void spi100k_write_data(struct spi_master *master, int len, int data)
 
 static int spi100k_read_data(struct spi_master *master, int len)
 {
-	int dataH, dataL;
+	int dataL;
 	struct omap1_spi100k *spi100k = spi_master_get_devdata(master);
 
 	/* Always do at least 16 bits */
@@ -146,7 +145,7 @@ static int spi100k_read_data(struct spi_master *master, int len)
 	udelay(1000);
 
 	dataL = readw(spi100k->base + SPI_RX_LSB);
-	dataH = readw(spi100k->base + SPI_RX_MSB);
+	readw(spi100k->base + SPI_RX_MSB);
 	spi100k_disable_clock(master);
 
 	return dataL;
@@ -247,9 +246,9 @@ static int omap1_spi100k_setup_transfer(struct spi_device *spi,
 	cs->word_len = word_len;
 
 	/* SPI init before transfer */
-	writew(0x3e , spi100k->base + SPI_SETUP1);
-	writew(0x00 , spi100k->base + SPI_STATUS);
-	writew(0x3e , spi100k->base + SPI_CTRL);
+	writew(0x3e, spi100k->base + SPI_SETUP1);
+	writew(0x00, spi100k->base + SPI_STATUS);
+	writew(0x3e, spi100k->base + SPI_CTRL);
 
 	return 0;
 }
@@ -321,8 +320,7 @@ static int omap1_spi100k_transfer_one_message(struct spi_master *master,
 			}
 		}
 
-		if (t->delay_usecs)
-			udelay(t->delay_usecs);
+		spi_transfer_delay_exec(t);
 
 		/* ignore the "leave it on after last xfer" hint */
 
@@ -426,7 +424,7 @@ err:
 
 static int omap1_spi100k_remove(struct platform_device *pdev)
 {
-	struct spi_master *master = spi_master_get(platform_get_drvdata(pdev));
+	struct spi_master *master = platform_get_drvdata(pdev);
 	struct omap1_spi100k *spi100k = spi_master_get_devdata(master);
 
 	pm_runtime_disable(&pdev->dev);
@@ -440,7 +438,7 @@ static int omap1_spi100k_remove(struct platform_device *pdev)
 #ifdef CONFIG_PM
 static int omap1_spi100k_runtime_suspend(struct device *dev)
 {
-	struct spi_master *master = spi_master_get(dev_get_drvdata(dev));
+	struct spi_master *master = dev_get_drvdata(dev);
 	struct omap1_spi100k *spi100k = spi_master_get_devdata(master);
 
 	clk_disable_unprepare(spi100k->ick);
@@ -451,7 +449,7 @@ static int omap1_spi100k_runtime_suspend(struct device *dev)
 
 static int omap1_spi100k_runtime_resume(struct device *dev)
 {
-	struct spi_master *master = spi_master_get(dev_get_drvdata(dev));
+	struct spi_master *master = dev_get_drvdata(dev);
 	struct omap1_spi100k *spi100k = spi_master_get_devdata(master);
 	int ret;
 

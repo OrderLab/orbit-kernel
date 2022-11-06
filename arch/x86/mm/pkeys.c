@@ -63,7 +63,7 @@ int __execute_only_pkey(struct mm_struct *mm)
 static inline bool vma_is_pkey_exec_only(struct vm_area_struct *vma)
 {
 	/* Do this check first since the vm_flags should be hot */
-	if ((vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC)) != VM_EXEC)
+	if ((vma->vm_flags & VM_ACCESS_FLAGS) != VM_EXEC)
 		return false;
 	if (vma_pkey(vma) != vma->vm_mm->context.execute_only_pkey)
 		return false;
@@ -128,7 +128,7 @@ u32 init_pkru_value = PKRU_AD_KEY( 1) | PKRU_AD_KEY( 2) | PKRU_AD_KEY( 3) |
 /*
  * Called from the FPU code when creating a fresh set of FPU
  * registers.  This is called from a very specific context where
- * we know the FPU regstiers are safe for use and we can use PKRU
+ * we know the FPU registers are safe for use and we can use PKRU
  * directly.
  */
 void copy_init_pkru_to_fpregs(void)

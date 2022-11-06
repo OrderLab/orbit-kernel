@@ -135,7 +135,7 @@ static int mxc4005_read_xyz(struct mxc4005_data *data)
 	int ret;
 
 	ret = regmap_bulk_read(data->regmap, MXC4005_REG_XOUT_UPPER,
-			       (u8 *) data->buffer, sizeof(data->buffer));
+			       data->buffer, sizeof(data->buffer));
 	if (ret < 0) {
 		dev_err(data->dev, "failed to read axes\n");
 		return ret;
@@ -150,7 +150,7 @@ static int mxc4005_read_axis(struct mxc4005_data *data,
 	__be16 reg;
 	int ret;
 
-	ret = regmap_bulk_read(data->regmap, addr, (u8 *) &reg, sizeof(reg));
+	ret = regmap_bulk_read(data->regmap, addr, &reg, sizeof(reg));
 	if (ret < 0) {
 		dev_err(data->dev, "failed to read reg %02x\n", addr);
 		return ret;
@@ -310,19 +310,15 @@ err:
 	return IRQ_HANDLED;
 }
 
-static int mxc4005_clr_intr(struct mxc4005_data *data)
+static void mxc4005_clr_intr(struct mxc4005_data *data)
 {
 	int ret;
 
 	/* clear interrupt */
 	ret = regmap_write(data->regmap, MXC4005_REG_INT_CLR1,
 			   MXC4005_REG_INT_CLR1_BIT_DRDYC);
-	if (ret < 0) {
+	if (ret < 0)
 		dev_err(data->dev, "failed to write to reg_int_clr1\n");
-		return ret;
-	}
-
-	return 0;
 }
 
 static int mxc4005_set_trigger_state(struct iio_trigger *trig,
@@ -353,20 +349,20 @@ static int mxc4005_set_trigger_state(struct iio_trigger *trig,
 	return 0;
 }
 
-static int mxc4005_trigger_try_reen(struct iio_trigger *trig)
+static void mxc4005_trigger_reen(struct iio_trigger *trig)
 {
 	struct iio_dev *indio_dev = iio_trigger_get_drvdata(trig);
 	struct mxc4005_data *data = iio_priv(indio_dev);
 
 	if (!data->dready_trig)
-		return 0;
+		return;
 
-	return mxc4005_clr_intr(data);
+	mxc4005_clr_intr(data);
 }
 
 static const struct iio_trigger_ops mxc4005_trigger_ops = {
 	.set_trigger_state = mxc4005_set_trigger_state,
-	.try_reenable = mxc4005_trigger_try_reen,
+	.reenable = mxc4005_trigger_reen,
 };
 
 static int mxc4005_chip_init(struct mxc4005_data *data)
@@ -416,7 +412,6 @@ static int mxc4005_probe(struct i2c_client *client,
 
 	mutex_init(&data->mutex);
 
-	indio_dev->dev.parent = &client->dev;
 	indio_dev->channels = mxc4005_channels;
 	indio_dev->num_channels = ARRAY_SIZE(mxc4005_channels);
 	indio_dev->available_scan_masks = mxc4005_scan_masks;
@@ -455,7 +450,6 @@ static int mxc4005_probe(struct i2c_client *client,
 			return ret;
 		}
 
-		data->dready_trig->dev.parent = &client->dev;
 		data->dready_trig->ops = &mxc4005_trigger_ops;
 		iio_trigger_set_drvdata(data->dready_trig, indio_dev);
 		indio_dev->trig = data->dready_trig;
@@ -474,12 +468,14 @@ static int mxc4005_probe(struct i2c_client *client,
 
 static const struct acpi_device_id mxc4005_acpi_match[] = {
 	{"MXC4005",	0},
+	{"MXC6655",	0},
 	{ },
 };
 MODULE_DEVICE_TABLE(acpi, mxc4005_acpi_match);
 
 static const struct i2c_device_id mxc4005_id[] = {
 	{"mxc4005",	0},
+	{"mxc6655",	0},
 	{ },
 };
 MODULE_DEVICE_TABLE(i2c, mxc4005_id);

@@ -117,8 +117,7 @@ static void ht16k33_fb_queue(struct ht16k33_priv *priv)
 {
 	struct ht16k33_fbdev *fbdev = &priv->fbdev;
 
-	schedule_delayed_work(&fbdev->work,
-			      msecs_to_jiffies(HZ / fbdev->refresh_rate));
+	schedule_delayed_work(&fbdev->work, HZ / fbdev->refresh_rate);
 }
 
 /*
@@ -228,7 +227,7 @@ static int ht16k33_mmap(struct fb_info *info, struct vm_area_struct *vma)
 	return vm_map_pages_zero(vma, &pages, 1);
 }
 
-static struct fb_ops ht16k33_fb_ops = {
+static const struct fb_ops ht16k33_fb_ops = {
 	.owner = THIS_MODULE,
 	.fb_read = fb_sys_read,
 	.fb_write = fb_sys_write,
@@ -402,11 +401,6 @@ static int ht16k33_probe(struct i2c_client *client,
 		return -EIO;
 	}
 
-	if (client->irq <= 0) {
-		dev_err(&client->dev, "No IRQ specified\n");
-		return -EINVAL;
-	}
-
 	priv = devm_kzalloc(&client->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
@@ -459,9 +453,12 @@ static int ht16k33_probe(struct i2c_client *client,
 	if (err)
 		goto err_fbdev_info;
 
-	err = ht16k33_keypad_probe(client, &priv->keypad);
-	if (err)
-		goto err_fbdev_unregister;
+	/* Keypad */
+	if (client->irq > 0) {
+		err = ht16k33_keypad_probe(client, &priv->keypad);
+		if (err)
+			goto err_fbdev_unregister;
+	}
 
 	/* Backlight */
 	memset(&bl_props, 0, sizeof(struct backlight_properties));

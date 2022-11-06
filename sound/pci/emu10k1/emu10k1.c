@@ -18,8 +18,6 @@
 MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("EMU10K1");
 MODULE_LICENSE("GPL");
-MODULE_SUPPORTED_DEVICE("{{Creative Labs,SB Live!/PCI512/E-mu APS},"
-	       "{Creative Labs,SB Audigy}}");
 
 #if IS_ENABLED(CONFIG_SND_SEQUENCER)
 #define ENABLE_SYNTH
@@ -124,8 +122,9 @@ static int snd_card_emu10k1_probe(struct pci_dev *pci,
 		goto error;
 	/* This stores the periods table. */
 	if (emu->card_capabilities->ca0151_chip) { /* P16V */	
-		if ((err = snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(pci),
-					       1024, &emu->p16v_buffer)) < 0)
+		err = snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, &pci->dev,
+					  1024, &emu->p16v_buffer);
+		if (err < 0)
 			goto error;
 	}
 
@@ -167,9 +166,9 @@ static int snd_card_emu10k1_probe(struct pci_dev *pci,
 	}
 #endif
  
-	strlcpy(card->driver, emu->card_capabilities->driver,
+	strscpy(card->driver, emu->card_capabilities->driver,
 		sizeof(card->driver));
-	strlcpy(card->shortname, emu->card_capabilities->name,
+	strscpy(card->shortname, emu->card_capabilities->name,
 		sizeof(card->shortname));
 	snprintf(card->longname, sizeof(card->longname),
 		 "%s (rev.%d, serial:0x%x) at 0x%lx, irq %i",

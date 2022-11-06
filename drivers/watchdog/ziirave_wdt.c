@@ -18,7 +18,6 @@
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <linux/types.h>
-#include <linux/version.h>
 #include <linux/watchdog.h>
 
 #include <asm/unaligned.h>
@@ -422,7 +421,7 @@ static int ziirave_firm_upload(struct watchdog_device *wdd,
 
 static const struct watchdog_info ziirave_wdt_info = {
 	.options = WDIOF_SETTIMEOUT | WDIOF_MAGICCLOSE | WDIOF_KEEPALIVEPING,
-	.identity = "Zodiac RAVE Watchdog",
+	.identity = "RAVE Switch Watchdog",
 };
 
 static const struct watchdog_ops ziirave_wdt_ops = {

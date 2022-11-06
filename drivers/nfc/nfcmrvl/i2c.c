@@ -1,4 +1,4 @@
-/**
+/*
  * Marvell NFC-over-I2C driver: I2C interface related functions
  *
  * Copyright (C) 2015, Marvell International Ltd.
@@ -278,7 +278,6 @@ static struct i2c_driver nfcmrvl_i2c_driver = {
 	.remove = nfcmrvl_i2c_remove,
 	.driver = {
 		.name		= "nfcmrvl_i2c",
-		.owner		= THIS_MODULE,
 		.of_match_table	= of_match_ptr(of_nfcmrvl_i2c_match),
 	},
 };

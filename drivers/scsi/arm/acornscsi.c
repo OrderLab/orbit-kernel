@@ -144,12 +144,6 @@
 #define VER_MINOR 0
 #define VER_PATCH 6
 
-#ifndef ABORT_TAG
-#define ABORT_TAG 0xd
-#else
-#error "Yippee!  ABORT TAG is now defined!  Remove this error!"
-#endif
-
 #ifdef USE_DMAC
 /*
  * DMAC setup parameters
@@ -1067,7 +1061,7 @@ void acornscsi_dma_setup(AS_Host *host, dmadir_t direction)
  * Purpose : ensure that all DMA transfers are up-to-date & host->scsi.SCp is correct
  * Params  : host - host to finish
  * Notes   : This is called when a command is:
- *		terminating, RESTORE_POINTERS, SAVE_POINTERS, DISCONECT
+ *		terminating, RESTORE_POINTERS, SAVE_POINTERS, DISCONNECT
  *	   : This must not return until all transfers are completed.
  */
 static
@@ -1490,8 +1484,8 @@ void acornscsi_message(AS_Host *host)
     }
 
     switch (message[0]) {
-    case ABORT:
-    case ABORT_TAG:
+    case ABORT_TASK_SET:
+    case ABORT_TASK:
     case COMMAND_COMPLETE:
 	if (host->scsi.phase != PHASE_STATUSIN) {
 	    printk(KERN_ERR "scsi%d.%c: command complete following non-status in phase?\n",
@@ -1594,10 +1588,6 @@ void acornscsi_message(AS_Host *host)
 	default:
 	    break;
 	}
-	break;
-
-    case QUEUE_FULL:
-	/* TODO: target queue is full */
 	break;
 
     case SIMPLE_QUEUE_TAG:
@@ -1816,7 +1806,7 @@ int acornscsi_reconnect(AS_Host *host)
 }
 
 /*
- * Function: int acornscsi_reconect_finish(AS_Host *host)
+ * Function: int acornscsi_reconnect_finish(AS_Host *host)
  * Purpose : finish reconnecting a command
  * Params  : host - host to complete
  * Returns : 0 if failed

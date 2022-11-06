@@ -151,15 +151,12 @@ static int rvt_modify_device(struct ib_device *device,
  *
  * Return: 0 on success
  */
-static int rvt_query_port(struct ib_device *ibdev, u8 port_num,
+static int rvt_query_port(struct ib_device *ibdev, u32 port_num,
 			  struct ib_port_attr *props)
 {
 	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
 	struct rvt_ibport *rvp;
-	int port_index = ibport_num_to_idx(ibdev, port_num);
-
-	if (port_index < 0)
-		return -EINVAL;
+	u32 port_index = ibport_num_to_idx(ibdev, port_num);
 
 	rvp = rdi->ports[port_index];
 	/* props being zeroed by the caller, avoid zeroing it here */
@@ -186,16 +183,13 @@ static int rvt_query_port(struct ib_device *ibdev, u8 port_num,
  *
  * Return: 0 on success
  */
-static int rvt_modify_port(struct ib_device *ibdev, u8 port_num,
+static int rvt_modify_port(struct ib_device *ibdev, u32 port_num,
 			   int port_modify_mask, struct ib_port_modify *props)
 {
 	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
 	struct rvt_ibport *rvp;
 	int ret = 0;
-	int port_index = ibport_num_to_idx(ibdev, port_num);
-
-	if (port_index < 0)
-		return -EINVAL;
+	u32 port_index = ibport_num_to_idx(ibdev, port_num);
 
 	rvp = rdi->ports[port_index];
 	if (port_modify_mask & IB_PORT_OPA_MASK_CHG) {
@@ -225,7 +219,7 @@ static int rvt_modify_port(struct ib_device *ibdev, u8 port_num,
  *
  * Return: 0 on failure pkey otherwise
  */
-static int rvt_query_pkey(struct ib_device *ibdev, u8 port_num, u16 index,
+static int rvt_query_pkey(struct ib_device *ibdev, u32 port_num, u16 index,
 			  u16 *pkey)
 {
 	/*
@@ -235,11 +229,9 @@ static int rvt_query_pkey(struct ib_device *ibdev, u8 port_num, u16 index,
 	 * no way to protect against that anyway.
 	 */
 	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
-	int port_index;
+	u32 port_index;
 
 	port_index = ibport_num_to_idx(ibdev, port_num);
-	if (port_index < 0)
-		return -EINVAL;
 
 	if (index >= rvt_get_npkeys(rdi))
 		return -EINVAL;
@@ -257,12 +249,12 @@ static int rvt_query_pkey(struct ib_device *ibdev, u8 port_num, u16 index,
  *
  * Return: 0 on success
  */
-static int rvt_query_gid(struct ib_device *ibdev, u8 port_num,
+static int rvt_query_gid(struct ib_device *ibdev, u32 port_num,
 			 int guid_index, union ib_gid *gid)
 {
 	struct rvt_dev_info *rdi;
 	struct rvt_ibport *rvp;
-	int port_index;
+	u32 port_index;
 
 	/*
 	 * Driver is responsible for updating the guid table. Which will be used
@@ -270,8 +262,6 @@ static int rvt_query_gid(struct ib_device *ibdev, u8 port_num,
 	 * is being done.
 	 */
 	port_index = ibport_num_to_idx(ibdev, port_num);
-	if (port_index < 0)
-		return -EINVAL;
 
 	rdi = ib_to_rvt(ibdev);
 	rvp = rdi->ports[port_index];
@@ -280,12 +270,6 @@ static int rvt_query_gid(struct ib_device *ibdev, u8 port_num,
 
 	return rdi->driver_f.get_guid_be(rdi, rvp, guid_index,
 					 &gid->global.interface_id);
-}
-
-static inline struct rvt_ucontext *to_iucontext(struct ib_ucontext
-						*ibucontext)
-{
-	return container_of(ibucontext, struct rvt_ucontext, ibucontext);
 }
 
 /**
@@ -300,23 +284,19 @@ static int rvt_alloc_ucontext(struct ib_ucontext *uctx, struct ib_udata *udata)
 
 /**
  * rvt_dealloc_ucontext - Free a user context
- * @context - Free this
+ * @context: Unused
  */
 static void rvt_dealloc_ucontext(struct ib_ucontext *context)
 {
 	return;
 }
 
-static int rvt_get_port_immutable(struct ib_device *ibdev, u8 port_num,
+static int rvt_get_port_immutable(struct ib_device *ibdev, u32 port_num,
 				  struct ib_port_immutable *immutable)
 {
 	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
 	struct ib_port_attr attr;
-	int err, port_index;
-
-	port_index = ibport_num_to_idx(ibdev, port_num);
-	if (port_index < 0)
-		return -EINVAL;
+	int err;
 
 	immutable->core_cap_flags = rdi->dparms.core_cap_flags;
 
@@ -382,7 +362,6 @@ enum {
 static const struct ib_device_ops rvt_dev_ops = {
 	.uverbs_abi_ver = RVT_UVERBS_ABI_VERSION,
 
-	.alloc_fmr = rvt_alloc_fmr,
 	.alloc_mr = rvt_alloc_mr,
 	.alloc_pd = rvt_alloc_pd,
 	.alloc_ucontext = rvt_alloc_ucontext,
@@ -391,7 +370,7 @@ static const struct ib_device_ops rvt_dev_ops = {
 	.create_cq = rvt_create_cq,
 	.create_qp = rvt_create_qp,
 	.create_srq = rvt_create_srq,
-	.dealloc_fmr = rvt_dealloc_fmr,
+	.create_user_ah = rvt_create_ah,
 	.dealloc_pd = rvt_dealloc_pd,
 	.dealloc_ucontext = rvt_dealloc_ucontext,
 	.dereg_mr = rvt_dereg_mr,
@@ -403,7 +382,6 @@ static const struct ib_device_ops rvt_dev_ops = {
 	.get_dma_mr = rvt_get_dma_mr,
 	.get_port_immutable = rvt_get_port_immutable,
 	.map_mr_sg = rvt_map_mr_sg,
-	.map_phys_fmr = rvt_map_phys_fmr,
 	.mmap = rvt_mmap,
 	.modify_ah = rvt_modify_ah,
 	.modify_device = rvt_modify_device,
@@ -424,7 +402,6 @@ static const struct ib_device_ops rvt_dev_ops = {
 	.reg_user_mr = rvt_reg_user_mr,
 	.req_notify_cq = rvt_req_notify_cq,
 	.resize_cq = rvt_resize_cq,
-	.unmap_fmr = rvt_unmap_fmr,
 
 	INIT_RDMA_OBJ_SIZE(ib_ah, rvt_ah, ibah),
 	INIT_RDMA_OBJ_SIZE(ib_cq, rvt_cq, ibcq),
@@ -588,9 +565,6 @@ int rvt_register_device(struct rvt_dev_info *rdi)
 	/* Completion queues */
 	spin_lock_init(&rdi->n_cqs_lock);
 
-	/* DMA Operations */
-	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
-
 	/* Protection Domain */
 	spin_lock_init(&rdi->n_pds_lock);
 	rdi->n_pds_allocated = 0;
@@ -601,43 +575,18 @@ int rvt_register_device(struct rvt_dev_info *rdi)
 	 * exactly which functions rdmavt supports, nor do they know the ABI
 	 * version, so we do all of this sort of stuff here.
 	 */
-	rdi->ibdev.uverbs_cmd_mask =
-		(1ull << IB_USER_VERBS_CMD_GET_CONTEXT)         |
-		(1ull << IB_USER_VERBS_CMD_QUERY_DEVICE)        |
-		(1ull << IB_USER_VERBS_CMD_QUERY_PORT)          |
-		(1ull << IB_USER_VERBS_CMD_ALLOC_PD)            |
-		(1ull << IB_USER_VERBS_CMD_DEALLOC_PD)          |
-		(1ull << IB_USER_VERBS_CMD_CREATE_AH)           |
-		(1ull << IB_USER_VERBS_CMD_MODIFY_AH)           |
-		(1ull << IB_USER_VERBS_CMD_QUERY_AH)            |
-		(1ull << IB_USER_VERBS_CMD_DESTROY_AH)          |
-		(1ull << IB_USER_VERBS_CMD_REG_MR)              |
-		(1ull << IB_USER_VERBS_CMD_DEREG_MR)            |
-		(1ull << IB_USER_VERBS_CMD_CREATE_COMP_CHANNEL) |
-		(1ull << IB_USER_VERBS_CMD_CREATE_CQ)           |
-		(1ull << IB_USER_VERBS_CMD_RESIZE_CQ)           |
-		(1ull << IB_USER_VERBS_CMD_DESTROY_CQ)          |
+	rdi->ibdev.uverbs_cmd_mask |=
 		(1ull << IB_USER_VERBS_CMD_POLL_CQ)             |
 		(1ull << IB_USER_VERBS_CMD_REQ_NOTIFY_CQ)       |
-		(1ull << IB_USER_VERBS_CMD_CREATE_QP)           |
-		(1ull << IB_USER_VERBS_CMD_QUERY_QP)            |
-		(1ull << IB_USER_VERBS_CMD_MODIFY_QP)           |
-		(1ull << IB_USER_VERBS_CMD_DESTROY_QP)          |
 		(1ull << IB_USER_VERBS_CMD_POST_SEND)           |
 		(1ull << IB_USER_VERBS_CMD_POST_RECV)           |
-		(1ull << IB_USER_VERBS_CMD_ATTACH_MCAST)        |
-		(1ull << IB_USER_VERBS_CMD_DETACH_MCAST)        |
-		(1ull << IB_USER_VERBS_CMD_CREATE_SRQ)          |
-		(1ull << IB_USER_VERBS_CMD_MODIFY_SRQ)          |
-		(1ull << IB_USER_VERBS_CMD_QUERY_SRQ)           |
-		(1ull << IB_USER_VERBS_CMD_DESTROY_SRQ)         |
 		(1ull << IB_USER_VERBS_CMD_POST_SRQ_RECV);
 	rdi->ibdev.node_type = RDMA_NODE_IB_CA;
 	if (!rdi->ibdev.num_comp_vectors)
 		rdi->ibdev.num_comp_vectors = 1;
 
 	/* We are now good to announce we exist */
-	ret = ib_register_device(&rdi->ibdev, dev_name(&rdi->ibdev.dev));
+	ret = ib_register_device(&rdi->ibdev, dev_name(&rdi->ibdev.dev), NULL);
 	if (ret) {
 		rvt_pr_err(rdi, "Failed to register driver with ib core.\n");
 		goto bail_wss;
@@ -681,9 +630,10 @@ EXPORT_SYMBOL(rvt_unregister_device);
 
 /**
  * rvt_init_port - init internal data for driver port
- * @rdi: rvt dev strut
+ * @rdi: rvt_dev_info struct
  * @port: rvt port
  * @port_index: 0 based index of ports, different from IB core port num
+ * @pkey_table: pkey_table for @port
  *
  * Keep track of a list of ports. No need to have a detach port.
  * They persist until the driver goes away.

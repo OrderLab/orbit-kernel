@@ -790,7 +790,7 @@ static void w5100_restart_work(struct work_struct *work)
 	w5100_restart(priv->ndev);
 }
 
-static void w5100_tx_timeout(struct net_device *ndev)
+static void w5100_tx_timeout(struct net_device *ndev, unsigned int txqueue)
 {
 	struct w5100_priv *priv = netdev_priv(ndev);
 
@@ -1157,7 +1157,7 @@ int w5100_probe(struct device *dev, const struct w5100_ops *ops,
 	INIT_WORK(&priv->setrx_work, w5100_setrx_work);
 	INIT_WORK(&priv->restart_work, w5100_restart_work);
 
-	if (!IS_ERR_OR_NULL(mac_addr))
+	if (mac_addr)
 		memcpy(ndev->dev_addr, mac_addr, ETH_ALEN);
 	else
 		eth_hw_addr_random(ndev);

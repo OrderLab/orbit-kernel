@@ -4,8 +4,10 @@
  */
 
 #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
+#include <linux/delay.h>
 #include "dpu_encoder_phys.h"
 #include "dpu_hw_interrupts.h"
+#include "dpu_hw_pingpong.h"
 #include "dpu_core_irq.h"
 #include "dpu_formats.h"
 #include "dpu_trace.h"
@@ -35,6 +37,8 @@
 
 #define DPU_ENC_WR_PTR_START_TIMEOUT_US 20000
 
+#define DPU_ENC_MAX_POLL_TIMEOUT_US	2000
+
 static bool dpu_encoder_phys_cmd_is_master(struct dpu_encoder_phys *phys_enc)
 {
 	return (phys_enc->split_role != ENC_ROLE_SLAVE) ? true : false;
@@ -45,8 +49,7 @@ static bool dpu_encoder_phys_cmd_mode_fixup(
 		const struct drm_display_mode *mode,
 		struct drm_display_mode *adj_mode)
 {
-	if (phys_enc)
-		DPU_DEBUG_CMDENC(to_dpu_encoder_phys_cmd(phys_enc), "\n");
+	DPU_DEBUG_CMDENC(to_dpu_encoder_phys_cmd(phys_enc), "\n");
 	return true;
 }
 
@@ -58,11 +61,8 @@ static void _dpu_encoder_phys_cmd_update_intf_cfg(
 	struct dpu_hw_ctl *ctl;
 	struct dpu_hw_intf_cfg intf_cfg = { 0 };
 
-	if (!phys_enc)
-		return;
-
 	ctl = phys_enc->hw_ctl;
-	if (!ctl || !ctl->ops.setup_intf_cfg)
+	if (!ctl->ops.setup_intf_cfg)
 		return;
 
 	intf_cfg.intf = phys_enc->intf_idx;
@@ -79,7 +79,7 @@ static void dpu_encoder_phys_cmd_pp_tx_done_irq(void *arg, int irq_idx)
 	int new_cnt;
 	u32 event = DPU_ENCODER_FRAME_EVENT_DONE;
 
-	if (!phys_enc || !phys_enc->hw_pp)
+	if (!phys_enc->hw_pp)
 		return;
 
 	DPU_ATRACE_BEGIN("pp_done_irq");
@@ -106,7 +106,7 @@ static void dpu_encoder_phys_cmd_pp_rd_ptr_irq(void *arg, int irq_idx)
 	struct dpu_encoder_phys *phys_enc = arg;
 	struct dpu_encoder_phys_cmd *cmd_enc;
 
-	if (!phys_enc || !phys_enc->hw_pp)
+	if (!phys_enc->hw_pp)
 		return;
 
 	DPU_ATRACE_BEGIN("rd_ptr_irq");
@@ -124,13 +124,8 @@ static void dpu_encoder_phys_cmd_pp_rd_ptr_irq(void *arg, int irq_idx)
 static void dpu_encoder_phys_cmd_ctl_start_irq(void *arg, int irq_idx)
 {
 	struct dpu_encoder_phys *phys_enc = arg;
-	struct dpu_encoder_phys_cmd *cmd_enc;
-
-	if (!phys_enc || !phys_enc->hw_ctl)
-		return;
 
 	DPU_ATRACE_BEGIN("ctl_start_irq");
-	cmd_enc = to_dpu_encoder_phys_cmd(phys_enc);
 
 	atomic_add_unless(&phys_enc->pending_ctlstart_cnt, -1, 0);
 
@@ -142,9 +137,6 @@ static void dpu_encoder_phys_cmd_ctl_start_irq(void *arg, int irq_idx)
 static void dpu_encoder_phys_cmd_underrun_irq(void *arg, int irq_idx)
 {
 	struct dpu_encoder_phys *phys_enc = arg;
-
-	if (!phys_enc)
-		return;
 
 	if (phys_enc->parent_ops->handle_underrun_virt)
 		phys_enc->parent_ops->handle_underrun_virt(phys_enc->parent,
@@ -181,7 +173,7 @@ static void dpu_encoder_phys_cmd_mode_set(
 	struct dpu_encoder_phys_cmd *cmd_enc =
 		to_dpu_encoder_phys_cmd(phys_enc);
 
-	if (!phys_enc || !mode || !adj_mode) {
+	if (!mode || !adj_mode) {
 		DPU_ERROR("invalid args\n");
 		return;
 	}
@@ -200,7 +192,7 @@ static int _dpu_encoder_phys_cmd_handle_ppdone_timeout(
 	u32 frame_event = DPU_ENCODER_FRAME_EVENT_ERROR;
 	bool do_log = false;
 
-	if (!phys_enc || !phys_enc->hw_pp || !phys_enc->hw_ctl)
+	if (!phys_enc->hw_pp)
 		return -EINVAL;
 
 	cmd_enc->pp_timeout_report_cnt++;
@@ -249,11 +241,6 @@ static int _dpu_encoder_phys_cmd_wait_for_idle(
 	struct dpu_encoder_wait_info wait_info;
 	int ret;
 
-	if (!phys_enc) {
-		DPU_ERROR("invalid encoder\n");
-		return -EINVAL;
-	}
-
 	wait_info.wq = &phys_enc->pending_kickoff_wq;
 	wait_info.atomic_cnt = &phys_enc->pending_kickoff_cnt;
 	wait_info.timeout_ms = KICKOFF_TIMEOUT_MS;
@@ -275,7 +262,7 @@ static int dpu_encoder_phys_cmd_control_vblank_irq(
 	int ret = 0;
 	int refcount;
 
-	if (!phys_enc || !phys_enc->hw_pp) {
+	if (!phys_enc->hw_pp) {
 		DPU_ERROR("invalid encoder\n");
 		return -EINVAL;
 	}
@@ -316,13 +303,6 @@ end:
 static void dpu_encoder_phys_cmd_irq_control(struct dpu_encoder_phys *phys_enc,
 		bool enable)
 {
-	struct dpu_encoder_phys_cmd *cmd_enc;
-
-	if (!phys_enc)
-		return;
-
-	cmd_enc = to_dpu_encoder_phys_cmd(phys_enc);
-
 	trace_dpu_enc_phys_cmd_irq_ctrl(DRMID(phys_enc->parent),
 			phys_enc->hw_pp->idx - PINGPONG_0,
 			enable, atomic_read(&phys_enc->vblank_refcount));
@@ -355,10 +335,9 @@ static void dpu_encoder_phys_cmd_tearcheck_config(
 	struct drm_display_mode *mode;
 	bool tc_enable = true;
 	u32 vsync_hz;
-	struct msm_drm_private *priv;
 	struct dpu_kms *dpu_kms;
 
-	if (!phys_enc || !phys_enc->hw_pp) {
+	if (!phys_enc->hw_pp) {
 		DPU_ERROR("invalid encoder\n");
 		return;
 	}
@@ -373,11 +352,6 @@ static void dpu_encoder_phys_cmd_tearcheck_config(
 	}
 
 	dpu_kms = phys_enc->dpu_kms;
-	if (!dpu_kms || !dpu_kms->dev || !dpu_kms->dev->dev_private) {
-		DPU_ERROR("invalid device\n");
-		return;
-	}
-	priv = dpu_kms->dev->dev_private;
 
 	/*
 	 * TE default: dsi byte clock calculated base on 70 fps;
@@ -398,15 +372,12 @@ static void dpu_encoder_phys_cmd_tearcheck_config(
 	tc_cfg.vsync_count = vsync_hz /
 				(mode->vtotal * drm_mode_vrefresh(mode));
 
-	/* enable external TE after kickoff to avoid premature autorefresh */
-	tc_cfg.hw_vsync_mode = 0;
-
 	/*
-	 * By setting sync_cfg_height to near max register value, we essentially
-	 * disable dpu hw generated TE signal, since hw TE will arrive first.
-	 * Only caveat is if due to error, we hit wrap-around.
+	 * Set the sync_cfg_height to twice vtotal so that if we lose a
+	 * TE event coming from the display TE pin we won't stall immediately
 	 */
-	tc_cfg.sync_cfg_height = 0xFFF0;
+	tc_cfg.hw_vsync_mode = 1;
+	tc_cfg.sync_cfg_height = mode->vtotal * 2;
 	tc_cfg.vsync_init_val = mode->vdisplay;
 	tc_cfg.sync_threshold_start = DEFAULT_TEARCHECK_SYNC_THRESH_START;
 	tc_cfg.sync_threshold_continue = DEFAULT_TEARCHECK_SYNC_THRESH_CONTINUE;
@@ -440,9 +411,8 @@ static void _dpu_encoder_phys_cmd_pingpong_config(
 	struct dpu_encoder_phys_cmd *cmd_enc =
 		to_dpu_encoder_phys_cmd(phys_enc);
 
-	if (!phys_enc || !phys_enc->hw_ctl || !phys_enc->hw_pp
-			|| !phys_enc->hw_ctl->ops.setup_intf_cfg) {
-		DPU_ERROR("invalid arg(s), enc %d\n", phys_enc != 0);
+	if (!phys_enc->hw_pp || !phys_enc->hw_ctl->ops.setup_intf_cfg) {
+		DPU_ERROR("invalid arg(s), enc %d\n", phys_enc != NULL);
 		return;
 	}
 
@@ -468,10 +438,9 @@ static void dpu_encoder_phys_cmd_enable_helper(
 		struct dpu_encoder_phys *phys_enc)
 {
 	struct dpu_hw_ctl *ctl;
-	u32 flush_mask = 0;
 
-	if (!phys_enc || !phys_enc->hw_ctl || !phys_enc->hw_pp) {
-		DPU_ERROR("invalid arg(s), encoder %d\n", phys_enc != 0);
+	if (!phys_enc->hw_pp) {
+		DPU_ERROR("invalid arg(s), encoder %d\n", phys_enc != NULL);
 		return;
 	}
 
@@ -483,8 +452,7 @@ static void dpu_encoder_phys_cmd_enable_helper(
 		return;
 
 	ctl = phys_enc->hw_ctl;
-	ctl->ops.get_bitmask_intf(ctl, &flush_mask, phys_enc->intf_idx);
-	ctl->ops.update_pending_flush(ctl, flush_mask);
+	ctl->ops.update_pending_flush_intf(ctl, phys_enc->intf_idx);
 }
 
 static void dpu_encoder_phys_cmd_enable(struct dpu_encoder_phys *phys_enc)
@@ -492,7 +460,7 @@ static void dpu_encoder_phys_cmd_enable(struct dpu_encoder_phys *phys_enc)
 	struct dpu_encoder_phys_cmd *cmd_enc =
 		to_dpu_encoder_phys_cmd(phys_enc);
 
-	if (!phys_enc || !phys_enc->hw_pp) {
+	if (!phys_enc->hw_pp) {
 		DPU_ERROR("invalid phys encoder\n");
 		return;
 	}
@@ -511,8 +479,7 @@ static void dpu_encoder_phys_cmd_enable(struct dpu_encoder_phys *phys_enc)
 static void _dpu_encoder_phys_cmd_connect_te(
 		struct dpu_encoder_phys *phys_enc, bool enable)
 {
-	if (!phys_enc || !phys_enc->hw_pp ||
-			!phys_enc->hw_pp->ops.connect_external_te)
+	if (!phys_enc->hw_pp || !phys_enc->hw_pp->ops.connect_external_te)
 		return;
 
 	trace_dpu_enc_phys_cmd_connect_te(DRMID(phys_enc->parent), enable);
@@ -530,7 +497,7 @@ static int dpu_encoder_phys_cmd_get_line_count(
 {
 	struct dpu_hw_pingpong *hw_pp;
 
-	if (!phys_enc || !phys_enc->hw_pp)
+	if (!phys_enc->hw_pp)
 		return -EINVAL;
 
 	if (!dpu_encoder_phys_cmd_is_master(phys_enc))
@@ -548,7 +515,7 @@ static void dpu_encoder_phys_cmd_disable(struct dpu_encoder_phys *phys_enc)
 	struct dpu_encoder_phys_cmd *cmd_enc =
 		to_dpu_encoder_phys_cmd(phys_enc);
 
-	if (!phys_enc || !phys_enc->hw_pp) {
+	if (!phys_enc->hw_pp) {
 		DPU_ERROR("invalid encoder\n");
 		return;
 	}
@@ -571,10 +538,6 @@ static void dpu_encoder_phys_cmd_destroy(struct dpu_encoder_phys *phys_enc)
 	struct dpu_encoder_phys_cmd *cmd_enc =
 		to_dpu_encoder_phys_cmd(phys_enc);
 
-	if (!phys_enc) {
-		DPU_ERROR("invalid encoder\n");
-		return;
-	}
 	kfree(cmd_enc);
 }
 
@@ -592,7 +555,7 @@ static void dpu_encoder_phys_cmd_prepare_for_kickoff(
 			to_dpu_encoder_phys_cmd(phys_enc);
 	int ret;
 
-	if (!phys_enc || !phys_enc->hw_pp) {
+	if (!phys_enc->hw_pp) {
 		DPU_ERROR("invalid encoder\n");
 		return;
 	}
@@ -618,6 +581,69 @@ static void dpu_encoder_phys_cmd_prepare_for_kickoff(
 			atomic_read(&phys_enc->pending_kickoff_cnt));
 }
 
+static bool dpu_encoder_phys_cmd_is_ongoing_pptx(
+		struct dpu_encoder_phys *phys_enc)
+{
+	struct dpu_hw_pp_vsync_info info;
+
+	if (!phys_enc)
+		return false;
+
+	phys_enc->hw_pp->ops.get_vsync_info(phys_enc->hw_pp, &info);
+	if (info.wr_ptr_line_count > 0 &&
+	    info.wr_ptr_line_count < phys_enc->cached_mode.vdisplay)
+		return true;
+
+	return false;
+}
+
+static void dpu_encoder_phys_cmd_prepare_commit(
+		struct dpu_encoder_phys *phys_enc)
+{
+	struct dpu_encoder_phys_cmd *cmd_enc =
+		to_dpu_encoder_phys_cmd(phys_enc);
+	int trial = 0;
+
+	if (!phys_enc)
+		return;
+	if (!phys_enc->hw_pp)
+		return;
+	if (!dpu_encoder_phys_cmd_is_master(phys_enc))
+		return;
+
+	/* If autorefresh is already disabled, we have nothing to do */
+	if (!phys_enc->hw_pp->ops.get_autorefresh(phys_enc->hw_pp, NULL))
+		return;
+
+	/*
+	 * If autorefresh is enabled, disable it and make sure it is safe to
+	 * proceed with current frame commit/push. Sequence fallowed is,
+	 * 1. Disable TE
+	 * 2. Disable autorefresh config
+	 * 4. Poll for frame transfer ongoing to be false
+	 * 5. Enable TE back
+	 */
+	_dpu_encoder_phys_cmd_connect_te(phys_enc, false);
+	phys_enc->hw_pp->ops.setup_autorefresh(phys_enc->hw_pp, 0, false);
+
+	do {
+		udelay(DPU_ENC_MAX_POLL_TIMEOUT_US);
+		if ((trial * DPU_ENC_MAX_POLL_TIMEOUT_US)
+				> (KICKOFF_TIMEOUT_MS * USEC_PER_MSEC)) {
+			DPU_ERROR_CMDENC(cmd_enc,
+					"disable autorefresh failed\n");
+			break;
+		}
+
+		trial++;
+	} while (dpu_encoder_phys_cmd_is_ongoing_pptx(phys_enc));
+
+	_dpu_encoder_phys_cmd_connect_te(phys_enc, true);
+
+	DPU_DEBUG_CMDENC(to_dpu_encoder_phys_cmd(phys_enc),
+			 "disabled autorefresh\n");
+}
+
 static int _dpu_encoder_phys_cmd_wait_for_ctl_start(
 		struct dpu_encoder_phys *phys_enc)
 {
@@ -625,11 +651,6 @@ static int _dpu_encoder_phys_cmd_wait_for_ctl_start(
 			to_dpu_encoder_phys_cmd(phys_enc);
 	struct dpu_encoder_wait_info wait_info;
 	int ret;
-
-	if (!phys_enc || !phys_enc->hw_ctl) {
-		DPU_ERROR("invalid argument(s)\n");
-		return -EINVAL;
-	}
 
 	wait_info.wq = &phys_enc->pending_kickoff_wq;
 	wait_info.atomic_cnt = &phys_enc->pending_ctlstart_cnt;
@@ -650,12 +671,6 @@ static int dpu_encoder_phys_cmd_wait_for_tx_complete(
 		struct dpu_encoder_phys *phys_enc)
 {
 	int rc;
-	struct dpu_encoder_phys_cmd *cmd_enc;
-
-	if (!phys_enc)
-		return -EINVAL;
-
-	cmd_enc = to_dpu_encoder_phys_cmd(phys_enc);
 
 	rc = _dpu_encoder_phys_cmd_wait_for_idle(phys_enc);
 	if (rc) {
@@ -670,23 +685,15 @@ static int dpu_encoder_phys_cmd_wait_for_tx_complete(
 static int dpu_encoder_phys_cmd_wait_for_commit_done(
 		struct dpu_encoder_phys *phys_enc)
 {
-	int rc = 0;
 	struct dpu_encoder_phys_cmd *cmd_enc;
-
-	if (!phys_enc)
-		return -EINVAL;
 
 	cmd_enc = to_dpu_encoder_phys_cmd(phys_enc);
 
 	/* only required for master controller */
-	if (dpu_encoder_phys_cmd_is_master(phys_enc))
-		rc = _dpu_encoder_phys_cmd_wait_for_ctl_start(phys_enc);
+	if (!dpu_encoder_phys_cmd_is_master(phys_enc))
+		return 0;
 
-	/* required for both controllers */
-	if (!rc && cmd_enc->serialize_wait4pp)
-		dpu_encoder_phys_cmd_prepare_for_kickoff(phys_enc);
-
-	return rc;
+	return _dpu_encoder_phys_cmd_wait_for_ctl_start(phys_enc);
 }
 
 static int dpu_encoder_phys_cmd_wait_for_vblank(
@@ -695,9 +702,6 @@ static int dpu_encoder_phys_cmd_wait_for_vblank(
 	int rc = 0;
 	struct dpu_encoder_phys_cmd *cmd_enc;
 	struct dpu_encoder_wait_info wait_info;
-
-	if (!phys_enc)
-		return -EINVAL;
 
 	cmd_enc = to_dpu_encoder_phys_cmd(phys_enc);
 
@@ -730,15 +734,13 @@ static void dpu_encoder_phys_cmd_handle_post_kickoff(
 static void dpu_encoder_phys_cmd_trigger_start(
 		struct dpu_encoder_phys *phys_enc)
 {
-	if (!phys_enc)
-		return;
-
 	dpu_encoder_helper_trigger_start(phys_enc);
 }
 
 static void dpu_encoder_phys_cmd_init_ops(
 		struct dpu_encoder_phys_ops *ops)
 {
+	ops->prepare_commit = dpu_encoder_phys_cmd_prepare_commit;
 	ops->is_master = dpu_encoder_phys_cmd_is_master;
 	ops->mode_set = dpu_encoder_phys_cmd_mode_set;
 	ops->mode_fixup = dpu_encoder_phys_cmd_mode_fixup;
@@ -831,6 +833,4 @@ struct dpu_encoder_phys *dpu_encoder_phys_cmd_init(
 	DPU_DEBUG_CMDENC(cmd_enc, "created\n");
 
 	return phys_enc;
-
-	return ERR_PTR(ret);
 }

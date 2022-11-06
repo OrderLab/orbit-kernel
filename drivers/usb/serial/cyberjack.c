@@ -47,7 +47,7 @@
 
 /* Function prototypes */
 static int cyberjack_port_probe(struct usb_serial_port *port);
-static int cyberjack_port_remove(struct usb_serial_port *port);
+static void cyberjack_port_remove(struct usb_serial_port *port);
 static int  cyberjack_open(struct tty_struct *tty,
 	struct usb_serial_port *port);
 static void cyberjack_close(struct usb_serial_port *port);
@@ -120,7 +120,7 @@ static int cyberjack_port_probe(struct usb_serial_port *port)
 	return 0;
 }
 
-static int cyberjack_port_remove(struct usb_serial_port *port)
+static void cyberjack_port_remove(struct usb_serial_port *port)
 {
 	struct cyberjack_private *priv;
 
@@ -128,8 +128,6 @@ static int cyberjack_port_remove(struct usb_serial_port *port)
 
 	priv = usb_get_serial_port_data(port);
 	kfree(priv);
-
-	return 0;
 }
 
 static int  cyberjack_open(struct tty_struct *tty,
@@ -276,7 +274,7 @@ static void cyberjack_read_int_callback(struct urb *urb)
 		old_rdtodo = priv->rdtodo;
 
 		if (old_rdtodo > SHRT_MAX - size) {
-			dev_dbg(dev, "To many bulk_in urbs to do.\n");
+			dev_dbg(dev, "Too many bulk_in urbs to do.\n");
 			spin_unlock_irqrestore(&priv->lock, flags);
 			goto resubmit;
 		}

@@ -170,7 +170,7 @@ static ssize_t xgene_pmu_format_show(struct device *dev,
 	struct dev_ext_attribute *eattr;
 
 	eattr = container_of(attr, struct dev_ext_attribute, attr);
-	return sprintf(buf, "%s\n", (char *) eattr->var);
+	return sysfs_emit(buf, "%s\n", (char *) eattr->var);
 }
 
 #define XGENE_PMU_FORMAT_ATTR(_name, _config)		\
@@ -281,7 +281,7 @@ static ssize_t xgene_pmu_event_show(struct device *dev,
 	struct dev_ext_attribute *eattr;
 
 	eattr = container_of(attr, struct dev_ext_attribute, attr);
-	return sprintf(buf, "config=0x%lx\n", (unsigned long) eattr->var);
+	return sysfs_emit(buf, "config=0x%lx\n", (unsigned long) eattr->var);
 }
 
 #define XGENE_PMU_EVENT_ATTR(_name, _config)		\
@@ -1234,10 +1234,9 @@ static irqreturn_t xgene_pmu_isr(int irq, void *dev_id)
 	u32 intr_mcu, intr_mcb, intr_l3c, intr_iob;
 	struct xgene_pmu_dev_ctx *ctx;
 	struct xgene_pmu *xgene_pmu = dev_id;
-	unsigned long flags;
 	u32 val;
 
-	raw_spin_lock_irqsave(&xgene_pmu->lock, flags);
+	raw_spin_lock(&xgene_pmu->lock);
 
 	/* Get Interrupt PMU source */
 	val = readl(xgene_pmu->pcppmu_csr + PCPPMU_INTSTATUS_REG);
@@ -1273,7 +1272,7 @@ static irqreturn_t xgene_pmu_isr(int irq, void *dev_id)
 		}
 	}
 
-	raw_spin_unlock_irqrestore(&xgene_pmu->lock, flags);
+	raw_spin_unlock(&xgene_pmu->lock);
 
 	return IRQ_HANDLED;
 }
@@ -1282,25 +1281,21 @@ static int acpi_pmu_probe_active_mcb_mcu_l3c(struct xgene_pmu *xgene_pmu,
 					     struct platform_device *pdev)
 {
 	void __iomem *csw_csr, *mcba_csr, *mcbb_csr;
-	struct resource *res;
 	unsigned int reg;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	csw_csr = devm_ioremap_resource(&pdev->dev, res);
+	csw_csr = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(csw_csr)) {
 		dev_err(&pdev->dev, "ioremap failed for CSW CSR resource\n");
 		return PTR_ERR(csw_csr);
 	}
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
-	mcba_csr = devm_ioremap_resource(&pdev->dev, res);
+	mcba_csr = devm_platform_ioremap_resource(pdev, 2);
 	if (IS_ERR(mcba_csr)) {
 		dev_err(&pdev->dev, "ioremap failed for MCBA CSR resource\n");
 		return PTR_ERR(mcba_csr);
 	}
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 3);
-	mcbb_csr = devm_ioremap_resource(&pdev->dev, res);
+	mcbb_csr = devm_platform_ioremap_resource(pdev, 3);
 	if (IS_ERR(mcbb_csr)) {
 		dev_err(&pdev->dev, "ioremap failed for MCBB CSR resource\n");
 		return PTR_ERR(mcbb_csr);
@@ -1332,13 +1327,11 @@ static int acpi_pmu_v3_probe_active_mcb_mcu_l3c(struct xgene_pmu *xgene_pmu,
 						struct platform_device *pdev)
 {
 	void __iomem *csw_csr;
-	struct resource *res;
 	unsigned int reg;
 	u32 mcb0routing;
 	u32 mcb1routing;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	csw_csr = devm_ioremap_resource(&pdev->dev, res);
+	csw_csr = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(csw_csr)) {
 		dev_err(&pdev->dev, "ioremap failed for CSW CSR resource\n");
 		return PTR_ERR(csw_csr);

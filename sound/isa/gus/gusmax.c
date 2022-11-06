@@ -21,7 +21,6 @@
 MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("Gravis UltraSound MAX");
 MODULE_LICENSE("GPL");
-MODULE_SUPPORTED_DEVICE("{{Gravis,UltraSound MAX}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
@@ -191,8 +190,8 @@ static int snd_gusmax_match(struct device *pdev, unsigned int dev)
 
 static int snd_gusmax_probe(struct device *pdev, unsigned int dev)
 {
-	static int possible_irqs[] = {5, 11, 12, 9, 7, 15, 3, -1};
-	static int possible_dmas[] = {5, 6, 7, 1, 3, -1};
+	static const int possible_irqs[] = {5, 11, 12, 9, 7, 15, 3, -1};
+	static const int possible_dmas[] = {5, 6, 7, 1, 3, -1};
 	int xirq, xdma1, xdma2, err;
 	struct snd_card *card;
 	struct snd_gus_card *gus = NULL;
@@ -241,7 +240,7 @@ static int snd_gusmax_probe(struct device *pdev, unsigned int dev)
 				     pcm_channels[dev],
 				     0, &gus);
 	} else {
-		static unsigned long possible_ports[] = {
+		static const unsigned long possible_ports[] = {
 			0x220, 0x230, 0x240, 0x250, 0x260
 		};
 		int i;
@@ -282,7 +281,8 @@ static int snd_gusmax_probe(struct device *pdev, unsigned int dev)
 		goto _err;
 	}
 	maxcard->irq = xirq;
-	
+	card->sync_irq = maxcard->irq;
+
 	err = snd_wss_create(card,
 			     gus->gf1.port + 0x10c, -1, xirq,
 			     xdma2 < 0 ? xdma1 : xdma2, xdma1,
@@ -337,10 +337,9 @@ static int snd_gusmax_probe(struct device *pdev, unsigned int dev)
 	return err;
 }
 
-static int snd_gusmax_remove(struct device *devptr, unsigned int dev)
+static void snd_gusmax_remove(struct device *devptr, unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(devptr));
-	return 0;
 }
 
 #define DEV_NAME "gusmax"

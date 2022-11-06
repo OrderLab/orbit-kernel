@@ -1,3 +1,5 @@
+.. _arm64_index:
+
 ==================
 ARM64 Architecture
 ==================
@@ -6,6 +8,7 @@ ARM64 Architecture
     :maxdepth: 1
 
     acpi_object_usage
+    amu
     arm-acpi
     booting
     cpu-feature-registers
@@ -13,11 +16,15 @@ ARM64 Architecture
     hugetlbpage
     legacy_instructions
     memory
+    memory-tagging-extension
+    perf
     pointer-authentication
     silicon-errata
     sve
     tagged-address-abi
     tagged-pointers
+
+    features
 
 .. only::  subproject and html
 

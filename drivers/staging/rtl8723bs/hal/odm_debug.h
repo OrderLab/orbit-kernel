@@ -13,7 +13,7 @@
 /* Define the debug levels */
 /*  */
 /* 1.	DBG_TRACE and DBG_LOUD are used for normal cases. */
-/* So that, they can help SW engineer to develope or trace states changed */
+/* So that, they can help SW engineer to developed or trace states changed */
 /* and also help HW enginner to trace every operation to and from HW, */
 /* e.g IO, Tx, Rx. */
 /*  */
@@ -34,7 +34,7 @@
 #define ODM_DBG_SERIOUS				2
 
 /*  */
-/* Abnormal, rare, or unexpeted cases. */
+/* Abnormal, rare, or unexpected cases. */
 /* For example, */
 /* IRP/Packet/OID canceled, */
 /* device suprisely unremoved and so on. */
@@ -131,8 +131,6 @@
 			ASSERT(false);\
 		} \
 	} while (0)
-#define ODM_dbg_enter() { DbgPrint("==> %s\n", __func__); }
-#define ODM_dbg_exit() { DbgPrint("<== %s\n", __func__); }
 #define ODM_dbg_trace(str) { DbgPrint("%s:%s\n", __func__, str); }
 
 #define ODM_PRINT_ADDR(pDM_Odm, comp, level, title_str, ptr)\
@@ -162,6 +160,6 @@
 	no_printk("%s %p", title_str, ptr)
 #endif
 
-void ODM_InitDebugSetting(PDM_ODM_T pDM_Odm);
+void ODM_InitDebugSetting(struct dm_odm_t *pDM_Odm);
 
 #endif	/*  __ODM_DBG_H__ */

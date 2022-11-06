@@ -12,35 +12,137 @@
 
 #include "stratix10-clk.h"
 
-static const char * const pll_mux[] = { "osc1", "cb-intosc-hs-div2-clk",
-					"f2s-free-clk",};
-static const char * const cntr_mux[] = { "main_pll", "periph_pll",
-					 "osc1", "cb-intosc-hs-div2-clk",
-					 "f2s-free-clk"};
-static const char * const boot_mux[] = { "osc1", "cb-intosc-hs-div2-clk",};
+static const struct clk_parent_data pll_mux[] = {
+	{ .fw_name = "osc1",
+	  .name = "osc1" },
+	{ .fw_name = "cb-intosc-hs-div2-clk",
+	  .name = "cb-intosc-hs-div2-clk" },
+	{ .fw_name = "f2s-free-clk",
+	  .name = "f2s-free-clk" },
+};
 
-static const char * const noc_free_mux[] = {"main_noc_base_clk",
-					    "peri_noc_base_clk",
-					    "osc1", "cb-intosc-hs-div2-clk",
-					    "f2s-free-clk"};
+static const struct clk_parent_data cntr_mux[] = {
+	{ .fw_name =  "main_pll",
+	  .name = "main_pll", },
+	{ .fw_name = "periph_pll",
+	  .name = "periph_pll", },
+	{ .fw_name = "osc1",
+	  .name = "osc1", },
+	{ .fw_name = "cb-intosc-hs-div2-clk",
+	  .name = "cb-intosc-hs-div2-clk", },
+	{ .fw_name = "f2s-free-clk",
+	  .name = "f2s-free-clk", },
+};
 
-static const char * const emaca_free_mux[] = {"peri_emaca_clk", "boot_clk"};
-static const char * const emacb_free_mux[] = {"peri_emacb_clk", "boot_clk"};
-static const char * const emac_ptp_free_mux[] = {"peri_emac_ptp_clk", "boot_clk"};
-static const char * const gpio_db_free_mux[] = {"peri_gpio_db_clk", "boot_clk"};
-static const char * const sdmmc_free_mux[] = {"main_sdmmc_clk", "boot_clk"};
-static const char * const s2f_usr1_free_mux[] = {"peri_s2f_usr1_clk", "boot_clk"};
-static const char * const psi_ref_free_mux[] = {"peri_psi_ref_clk", "boot_clk"};
-static const char * const mpu_mux[] = { "mpu_free_clk", "boot_clk",};
+static const struct clk_parent_data boot_mux[] = {
+	{ .fw_name = "osc1",
+	  .name = "osc1" },
+	{ .fw_name = "cb-intosc-hs-div2-clk",
+	  .name = "cb-intosc-hs-div2-clk" },
+};
 
-static const char * const s2f_usr0_mux[] = {"f2s-free-clk", "boot_clk"};
-static const char * const emac_mux[] = {"emaca_free_clk", "emacb_free_clk"};
-static const char * const noc_mux[] = {"noc_free_clk", "boot_clk"};
+static const struct clk_parent_data noc_free_mux[] = {
+	{ .fw_name = "main_noc_base_clk",
+	  .name = "main_noc_base_clk", },
+	{ .fw_name = "peri_noc_base_clk",
+	  .name = "peri_noc_base_clk", },
+	{ .fw_name = "osc1",
+	  .name = "osc1", },
+	{ .fw_name = "cb-intosc-hs-div2-clk",
+	  .name = "cb-intosc-hs-div2-clk", },
+	{ .fw_name = "f2s-free-clk",
+	  .name = "f2s-free-clk", },
+};
 
-static const char * const mpu_free_mux[] = {"main_mpu_base_clk",
-					    "peri_mpu_base_clk",
-					    "osc1", "cb-intosc-hs-div2-clk",
-					    "f2s-free-clk"};
+static const struct clk_parent_data emaca_free_mux[] = {
+	{ .fw_name = "peri_emaca_clk",
+	  .name = "peri_emaca_clk", },
+	{ .fw_name = "boot_clk",
+	  .name = "boot_clk", },
+};
+
+static const struct clk_parent_data emacb_free_mux[] = {
+	{ .fw_name = "peri_emacb_clk",
+	  .name = "peri_emacb_clk", },
+	{ .fw_name = "boot_clk",
+	  .name = "boot_clk", },
+};
+
+static const struct clk_parent_data emac_ptp_free_mux[] = {
+	{ .fw_name = "peri_emac_ptp_clk",
+	  .name = "peri_emac_ptp_clk", },
+	{ .fw_name = "boot_clk",
+	  .name = "boot_clk", },
+};
+
+static const struct clk_parent_data gpio_db_free_mux[] = {
+	{ .fw_name = "peri_gpio_db_clk",
+	  .name = "peri_gpio_db_clk", },
+	{ .fw_name = "boot_clk",
+	  .name = "boot_clk", },
+};
+
+static const struct clk_parent_data sdmmc_free_mux[] = {
+	{ .fw_name = "main_sdmmc_clk",
+	  .name = "main_sdmmc_clk", },
+	{ .fw_name = "boot_clk",
+	  .name = "boot_clk", },
+};
+
+static const struct clk_parent_data s2f_usr1_free_mux[] = {
+	{ .fw_name = "peri_s2f_usr1_clk",
+	  .name = "peri_s2f_usr1_clk", },
+	{ .fw_name = "boot_clk",
+	  .name = "boot_clk", },
+};
+
+static const struct clk_parent_data psi_ref_free_mux[] = {
+	{ .fw_name = "peri_psi_ref_clk",
+	  .name = "peri_psi_ref_clk", },
+	{ .fw_name = "boot_clk",
+	  .name = "boot_clk", },
+};
+
+static const struct clk_parent_data mpu_mux[] = {
+	{ .fw_name = "mpu_free_clk",
+	  .name = "mpu_free_clk", },
+	{ .fw_name = "boot_clk",
+	  .name = "boot_clk", },
+};
+
+static const struct clk_parent_data s2f_usr0_mux[] = {
+	{ .fw_name = "f2s-free-clk",
+	  .name = "f2s-free-clk", },
+	{ .fw_name = "boot_clk",
+	  .name = "boot_clk", },
+};
+
+static const struct clk_parent_data emac_mux[] = {
+	{ .fw_name = "emaca_free_clk",
+	  .name = "emaca_free_clk", },
+	{ .fw_name = "emacb_free_clk",
+	  .name = "emacb_free_clk", },
+};
+
+static const struct clk_parent_data noc_mux[] = {
+	{ .fw_name = "noc_free_clk",
+	  .name = "noc_free_clk", },
+	{ .fw_name = "boot_clk",
+	  .name = "boot_clk", },
+};
+
+static const struct clk_parent_data mpu_free_mux[] = {
+	{ .fw_name = "main_mpu_base_clk",
+	  .name = "main_mpu_base_clk", },
+	{ .fw_name = "peri_mpu_base_clk",
+	  .name = "peri_mpu_base_clk", },
+	{ .fw_name = "osc1",
+	  .name = "osc1", },
+	{ .fw_name = "cb-intosc-hs-div2-clk",
+	  .name = "cb-intosc-hs-div2-clk", },
+	{ .fw_name = "f2s-free-clk",
+	  .name = "f2s-free-clk", },
+};
 
 /* clocks in AO (always on) controller */
 static const struct stratix10_pll_clock s10_pll_clks[] = {
@@ -172,20 +274,18 @@ static const struct stratix10_gate_clock s10_gate_clks[] = {
 static int s10_clk_register_c_perip(const struct stratix10_perip_c_clock *clks,
 				    int nums, struct stratix10_clock_data *data)
 {
-	struct clk *clk;
+	struct clk_hw *hw_clk;
 	void __iomem *base = data->base;
 	int i;
 
 	for (i = 0; i < nums; i++) {
-		clk = s10_register_periph(clks[i].name, clks[i].parent_name,
-					  clks[i].parent_names, clks[i].num_parents,
-					  clks[i].flags, base, clks[i].offset);
-		if (IS_ERR(clk)) {
+		hw_clk = s10_register_periph(&clks[i], base);
+		if (IS_ERR(hw_clk)) {
 			pr_err("%s: failed to register clock %s\n",
 			       __func__, clks[i].name);
 			continue;
 		}
-		data->clk_data.clks[clks[i].id] = clk;
+		data->clk_data.hws[clks[i].id] = hw_clk;
 	}
 	return 0;
 }
@@ -193,25 +293,18 @@ static int s10_clk_register_c_perip(const struct stratix10_perip_c_clock *clks,
 static int s10_clk_register_cnt_perip(const struct stratix10_perip_cnt_clock *clks,
 				      int nums, struct stratix10_clock_data *data)
 {
-	struct clk *clk;
+	struct clk_hw *hw_clk;
 	void __iomem *base = data->base;
 	int i;
 
 	for (i = 0; i < nums; i++) {
-		clk = s10_register_cnt_periph(clks[i].name, clks[i].parent_name,
-					      clks[i].parent_names,
-					      clks[i].num_parents,
-					      clks[i].flags, base,
-					      clks[i].offset,
-					      clks[i].fixed_divider,
-					      clks[i].bypass_reg,
-					      clks[i].bypass_shift);
-		if (IS_ERR(clk)) {
+		hw_clk = s10_register_cnt_periph(&clks[i], base);
+		if (IS_ERR(hw_clk)) {
 			pr_err("%s: failed to register clock %s\n",
 			       __func__, clks[i].name);
 			continue;
 		}
-		data->clk_data.clks[clks[i].id] = clk;
+		data->clk_data.hws[clks[i].id] = hw_clk;
 	}
 
 	return 0;
@@ -220,27 +313,18 @@ static int s10_clk_register_cnt_perip(const struct stratix10_perip_cnt_clock *cl
 static int s10_clk_register_gate(const struct stratix10_gate_clock *clks,
 				 int nums, struct stratix10_clock_data *data)
 {
-	struct clk *clk;
+	struct clk_hw *hw_clk;
 	void __iomem *base = data->base;
 	int i;
 
 	for (i = 0; i < nums; i++) {
-		clk = s10_register_gate(clks[i].name, clks[i].parent_name,
-					clks[i].parent_names,
-					clks[i].num_parents,
-					clks[i].flags, base,
-					clks[i].gate_reg,
-					clks[i].gate_idx, clks[i].div_reg,
-					clks[i].div_offset, clks[i].div_width,
-					clks[i].bypass_reg,
-					clks[i].bypass_shift,
-					clks[i].fixed_div);
-		if (IS_ERR(clk)) {
+		hw_clk = s10_register_gate(&clks[i], base);
+		if (IS_ERR(hw_clk)) {
 			pr_err("%s: failed to register clock %s\n",
 			       __func__, clks[i].name);
 			continue;
 		}
-		data->clk_data.clks[clks[i].id] = clk;
+		data->clk_data.hws[clks[i].id] = hw_clk;
 	}
 
 	return 0;
@@ -249,65 +333,50 @@ static int s10_clk_register_gate(const struct stratix10_gate_clock *clks,
 static int s10_clk_register_pll(const struct stratix10_pll_clock *clks,
 				 int nums, struct stratix10_clock_data *data)
 {
-	struct clk *clk;
+	struct clk_hw *hw_clk;
 	void __iomem *base = data->base;
 	int i;
 
 	for (i = 0; i < nums; i++) {
-		clk = s10_register_pll(clks[i].name, clks[i].parent_names,
-				    clks[i].num_parents,
-				    clks[i].flags, base,
-				    clks[i].offset);
-		if (IS_ERR(clk)) {
+		hw_clk = s10_register_pll(&clks[i], base);
+		if (IS_ERR(hw_clk)) {
 			pr_err("%s: failed to register clock %s\n",
 			       __func__, clks[i].name);
 			continue;
 		}
-		data->clk_data.clks[clks[i].id] = clk;
+		data->clk_data.hws[clks[i].id] = hw_clk;
 	}
 
 	return 0;
 }
 
-static struct stratix10_clock_data *__socfpga_s10_clk_init(struct platform_device *pdev,
-						    int nr_clks)
+static int s10_clkmgr_init(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
 	struct device *dev = &pdev->dev;
 	struct stratix10_clock_data *clk_data;
-	struct clk **clk_table;
 	struct resource *res;
 	void __iomem *base;
+	int i, num_clks;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	base = devm_ioremap_resource(dev, res);
 	if (IS_ERR(base)) {
 		pr_err("%s: failed to map clock registers\n", __func__);
-		return ERR_CAST(base);
+		return PTR_ERR(base);
 	}
 
-	clk_data = devm_kzalloc(dev, sizeof(*clk_data), GFP_KERNEL);
+	num_clks = STRATIX10_NUM_CLKS;
+	clk_data = devm_kzalloc(dev, struct_size(clk_data, clk_data.hws,
+						 num_clks), GFP_KERNEL);
 	if (!clk_data)
-		return ERR_PTR(-ENOMEM);
+		return -ENOMEM;
+
+	for (i = 0; i < num_clks; i++)
+		clk_data->clk_data.hws[i] = ERR_PTR(-ENOENT);
 
 	clk_data->base = base;
-	clk_table = devm_kcalloc(dev, nr_clks, sizeof(*clk_table), GFP_KERNEL);
-	if (!clk_table)
-		return ERR_PTR(-ENOMEM);
-
-	clk_data->clk_data.clks = clk_table;
-	clk_data->clk_data.clk_num = nr_clks;
-	of_clk_add_provider(np, of_clk_src_onecell_get, &clk_data->clk_data);
-	return clk_data;
-}
-
-static int s10_clkmgr_init(struct platform_device *pdev)
-{
-	struct stratix10_clock_data *clk_data;
-
-	clk_data = __socfpga_s10_clk_init(pdev, STRATIX10_NUM_CLKS);
-	if (IS_ERR(clk_data))
-		return PTR_ERR(clk_data);
+	clk_data->clk_data.num = num_clks;
 
 	s10_clk_register_pll(s10_pll_clks, ARRAY_SIZE(s10_pll_clks), clk_data);
 
@@ -320,6 +389,8 @@ static int s10_clkmgr_init(struct platform_device *pdev)
 
 	s10_clk_register_gate(s10_gate_clks, ARRAY_SIZE(s10_gate_clks),
 			      clk_data);
+
+	of_clk_add_hw_provider(np, of_clk_hw_onecell_get, &clk_data->clk_data);
 	return 0;
 }
 

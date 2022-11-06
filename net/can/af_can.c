@@ -304,8 +304,8 @@ static struct can_dev_rcv_lists *can_dev_rcv_lists_find(struct net *net,
 							struct net_device *dev)
 {
 	if (dev) {
-		struct can_ml_priv *ml_priv = dev->ml_priv;
-		return &ml_priv->dev_rcv_lists;
+		struct can_ml_priv *can_ml = can_get_ml_priv(dev);
+		return &can_ml->dev_rcv_lists;
 	} else {
 		return net->can.rx_alldev_list;
 	}
@@ -338,7 +338,7 @@ static unsigned int effhash(canid_t can_id)
  * can_rcv_list_find - determine optimal filterlist inside device filter struct
  * @can_id: pointer to CAN identifier of a given can_filter
  * @mask: pointer to CAN mask of a given can_filter
- * @d: pointer to the device filter struct
+ * @dev_rcv_lists: pointer to the device filter struct
  *
  * Description:
  *  Returns the optimal filterlist to reduce the filter handling in the
@@ -358,7 +358,7 @@ static unsigned int effhash(canid_t can_id)
  *
  * Return:
  *  Pointer to optimal filterlist for the given can_id/mask pair.
- *  Constistency checked mask.
+ *  Consistency checked mask.
  *  Reduced can_id to have a preprocessed filter compare value.
  */
 static struct hlist_head *can_rcv_list_find(canid_t *can_id, canid_t *mask,
@@ -410,7 +410,8 @@ static struct hlist_head *can_rcv_list_find(canid_t *can_id, canid_t *mask,
 
 /**
  * can_rx_register - subscribe CAN frames from a specific interface
- * @dev: pointer to netdevice (NULL => subcribe from 'all' CAN devices list)
+ * @net: the applicable net namespace
+ * @dev: pointer to netdevice (NULL => subscribe from 'all' CAN devices list)
  * @can_id: CAN identifier (see description)
  * @mask: CAN mask (see description)
  * @func: callback function on filter match
@@ -498,6 +499,7 @@ static void can_rx_delete_receiver(struct rcu_head *rp)
 
 /**
  * can_rx_unregister - unsubscribe CAN frames from a specific interface
+ * @net: the applicable net namespace
  * @dev: pointer to netdevice (NULL => unsubscribe from 'all' CAN devices list)
  * @can_id: CAN identifier
  * @mask: CAN mask
@@ -788,25 +790,6 @@ void can_proto_unregister(const struct can_proto *cp)
 }
 EXPORT_SYMBOL(can_proto_unregister);
 
-/* af_can notifier to create/remove CAN netdevice specific structs */
-static int can_notifier(struct notifier_block *nb, unsigned long msg,
-			void *ptr)
-{
-	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
-
-	if (dev->type != ARPHRD_CAN)
-		return NOTIFY_DONE;
-
-	switch (msg) {
-	case NETDEV_REGISTER:
-		WARN(!dev->ml_priv,
-		     "No CAN mid layer private allocated, please fix your driver and use alloc_candev()!\n");
-		break;
-	}
-
-	return NOTIFY_DONE;
-}
-
 static int can_pernet_init(struct net *net)
 {
 	spin_lock_init(&net->can.rcvlists_lock);
@@ -874,11 +857,6 @@ static const struct net_proto_family can_family_ops = {
 	.owner  = THIS_MODULE,
 };
 
-/* notifier block for netdevice event */
-static struct notifier_block can_netdev_notifier __read_mostly = {
-	.notifier_call = can_notifier,
-};
-
 static struct pernet_operations can_pernet_ops __read_mostly = {
 	.init = can_pernet_init,
 	.exit = can_pernet_exit,
@@ -889,12 +867,12 @@ static __init int can_init(void)
 	int err;
 
 	/* check for correct padding to be able to use the structs similarly */
-	BUILD_BUG_ON(offsetof(struct can_frame, can_dlc) !=
+	BUILD_BUG_ON(offsetof(struct can_frame, len) !=
 		     offsetof(struct canfd_frame, len) ||
 		     offsetof(struct can_frame, data) !=
 		     offsetof(struct canfd_frame, data));
 
-	pr_info("can: controller area network core (" CAN_VERSION_STRING ")\n");
+	pr_info("can: controller area network core\n");
 
 	rcv_cache = kmem_cache_create("can_receiver", sizeof(struct receiver),
 				      0, 0, NULL);
@@ -909,17 +887,12 @@ static __init int can_init(void)
 	err = sock_register(&can_family_ops);
 	if (err)
 		goto out_sock;
-	err = register_netdevice_notifier(&can_netdev_notifier);
-	if (err)
-		goto out_notifier;
 
 	dev_add_pack(&can_packet);
 	dev_add_pack(&canfd_packet);
 
 	return 0;
 
-out_notifier:
-	sock_unregister(PF_CAN);
 out_sock:
 	unregister_pernet_subsys(&can_pernet_ops);
 out_pernet:
@@ -933,7 +906,6 @@ static __exit void can_exit(void)
 	/* protocol unregister */
 	dev_remove_pack(&canfd_packet);
 	dev_remove_pack(&can_packet);
-	unregister_netdevice_notifier(&can_netdev_notifier);
 	sock_unregister(PF_CAN);
 
 	unregister_pernet_subsys(&can_pernet_ops);

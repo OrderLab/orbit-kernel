@@ -69,6 +69,7 @@ struct usb_mixer_elem_list {
 	bool is_std_info;
 	usb_mixer_elem_dump_func_t dump;
 	usb_mixer_elem_resume_func_t resume;
+	usb_mixer_elem_resume_func_t reset_resume;
 };
 
 /* iterate over mixer element list of the given unit id */
@@ -131,6 +132,6 @@ int snd_usb_get_cur_mix_value(struct usb_mixer_elem_info *cval,
 
 extern void snd_usb_mixer_elem_free(struct snd_kcontrol *kctl);
 
-extern struct snd_kcontrol_new *snd_usb_feature_unit_ctl;
+extern const struct snd_kcontrol_new *snd_usb_feature_unit_ctl;
 
 #endif /* __USBMIXER_H */

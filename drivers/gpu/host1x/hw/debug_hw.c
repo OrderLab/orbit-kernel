@@ -192,13 +192,19 @@ static void show_gather(struct output *o, phys_addr_t phys_addr,
 
 static void show_channel_gathers(struct output *o, struct host1x_cdma *cdma)
 {
+	struct push_buffer *pb = &cdma->push_buffer;
 	struct host1x_job *job;
+
+	host1x_debug_output(o, "PUSHBUF at %pad, %u words\n",
+			    &pb->dma, pb->size / 4);
+
+	show_gather(o, pb->dma, pb->size / 4, cdma, pb->dma, pb->mapped);
 
 	list_for_each_entry(job, &cdma->sync_queue, list) {
 		unsigned int i;
 
 		host1x_debug_output(o, "\n%p: JOB, syncpt_id=%d, syncpt_val=%d, first_get=%08x, timeout=%d num_slots=%d, num_handles=%d\n",
-				    job, job->syncpt_id, job->syncpt_end,
+				    job, job->syncpt->id, job->syncpt_end,
 				    job->first_get, job->timeout,
 				    job->num_slots, job->num_unpins);
 

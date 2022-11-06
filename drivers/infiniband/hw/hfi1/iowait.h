@@ -321,7 +321,7 @@ static inline void iowait_drain_wakeup(struct iowait *wait)
 /**
  * iowait_get_txhead() - get packet off of iowait list
  *
- * @wait iowait_work struture
+ * @wait: iowait_work structure
  */
 static inline struct sdma_txreq *iowait_get_txhead(struct iowait_work *wait)
 {
@@ -399,7 +399,7 @@ static inline void iowait_get_priority(struct iowait *w)
  * @wait_head: the wait queue
  *
  * This function is called to insert an iowait struct into a
- * wait queue after a resource (eg, sdma decriptor or pio
+ * wait queue after a resource (eg, sdma descriptor or pio
  * buffer) is run out.
  */
 static inline void iowait_queue(bool pkts_sent, struct iowait *w,

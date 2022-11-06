@@ -70,7 +70,6 @@ struct frame_buffer {
 struct isi_graph_entity {
 	struct device_node *node;
 
-	struct v4l2_async_subdev asd;
 	struct v4l2_subdev *subdev;
 };
 
@@ -148,7 +147,8 @@ static void configure_geometry(struct atmel_isi *isi)
 	u32 fourcc = isi->current_fmt->fourcc;
 
 	isi->enable_preview_path = fourcc == V4L2_PIX_FMT_RGB565 ||
-				   fourcc == V4L2_PIX_FMT_RGB32;
+				   fourcc == V4L2_PIX_FMT_RGB32 ||
+				   fourcc == V4L2_PIX_FMT_Y16;
 
 	/* According to sensor's output format to set cfg2 */
 	cfg2 = isi->current_fmt->swap;
@@ -554,12 +554,36 @@ static const struct isi_format *find_format_by_fourcc(struct atmel_isi *isi,
 	return NULL;
 }
 
+static void isi_try_fse(struct atmel_isi *isi, const struct isi_format *isi_fmt,
+			struct v4l2_subdev_pad_config *pad_cfg)
+{
+	int ret;
+	struct v4l2_subdev_frame_size_enum fse = {
+		.code = isi_fmt->mbus_code,
+		.which = V4L2_SUBDEV_FORMAT_TRY,
+	};
+
+	ret = v4l2_subdev_call(isi->entity.subdev, pad, enum_frame_size,
+			       pad_cfg, &fse);
+	/*
+	 * Attempt to obtain format size from subdev. If not available,
+	 * just use the maximum ISI can receive.
+	 */
+	if (ret) {
+		pad_cfg->try_crop.width = MAX_SUPPORT_WIDTH;
+		pad_cfg->try_crop.height = MAX_SUPPORT_HEIGHT;
+	} else {
+		pad_cfg->try_crop.width = fse.max_width;
+		pad_cfg->try_crop.height = fse.max_height;
+	}
+}
+
 static int isi_try_fmt(struct atmel_isi *isi, struct v4l2_format *f,
 		       const struct isi_format **current_fmt)
 {
 	const struct isi_format *isi_fmt;
 	struct v4l2_pix_format *pixfmt = &f->fmt.pix;
-	struct v4l2_subdev_pad_config pad_cfg;
+	struct v4l2_subdev_pad_config pad_cfg = {};
 	struct v4l2_subdev_format format = {
 		.which = V4L2_SUBDEV_FORMAT_TRY,
 	};
@@ -576,6 +600,9 @@ static int isi_try_fmt(struct atmel_isi *isi, struct v4l2_format *f,
 	pixfmt->height = clamp(pixfmt->height, 0U, MAX_SUPPORT_HEIGHT);
 
 	v4l2_fill_mbus_format(&format.format, pixfmt, isi_fmt->mbus_code);
+
+	isi_try_fse(isi, isi_fmt, &pad_cfg);
+
 	ret = v4l2_subdev_call(isi->entity.subdev, pad, set_fmt,
 			       &pad_cfg, &format);
 	if (ret < 0)
@@ -990,6 +1017,16 @@ static const struct isi_format isi_formats[] = {
 		.mbus_code = MEDIA_BUS_FMT_VYUY8_2X8,
 		.bpp = 2,
 		.swap = ISI_CFG2_YCC_SWAP_MODE_1,
+	}, {
+		.fourcc = V4L2_PIX_FMT_GREY,
+		.mbus_code = MEDIA_BUS_FMT_Y10_1X10,
+		.bpp = 1,
+		.swap = ISI_CFG2_GS_MODE_2_PIXEL | ISI_CFG2_GRAYSCALE,
+	}, {
+		.fourcc = V4L2_PIX_FMT_Y16,
+		.mbus_code = MEDIA_BUS_FMT_Y10_1X10,
+		.bpp = 2,
+		.swap = ISI_CFG2_GS_MODE_2_PIXEL | ISI_CFG2_GRAYSCALE,
 	},
 };
 
@@ -1056,7 +1093,7 @@ static int isi_graph_notify_complete(struct v4l2_async_notifier *notifier)
 		return ret;
 	}
 
-	ret = video_register_device(isi->vdev, VFL_TYPE_GRABBER, -1);
+	ret = video_register_device(isi->vdev, VFL_TYPE_VIDEO, -1);
 	if (ret) {
 		dev_err(isi->dev, "Failed to register video device\n");
 		return ret;
@@ -1098,45 +1135,26 @@ static const struct v4l2_async_notifier_operations isi_graph_notify_ops = {
 	.complete = isi_graph_notify_complete,
 };
 
-static int isi_graph_parse(struct atmel_isi *isi, struct device_node *node)
+static int isi_graph_init(struct atmel_isi *isi)
 {
-	struct device_node *ep = NULL;
-	struct device_node *remote;
+	struct v4l2_async_subdev *asd;
+	struct device_node *ep;
+	int ret;
 
-	ep = of_graph_get_next_endpoint(node, ep);
+	ep = of_graph_get_next_endpoint(isi->dev->of_node, NULL);
 	if (!ep)
 		return -EINVAL;
 
-	remote = of_graph_get_remote_port_parent(ep);
-	of_node_put(ep);
-	if (!remote)
-		return -EINVAL;
-
-	/* Remote node to connect */
-	isi->entity.node = remote;
-	isi->entity.asd.match_type = V4L2_ASYNC_MATCH_FWNODE;
-	isi->entity.asd.match.fwnode = of_fwnode_handle(remote);
-	return 0;
-}
-
-static int isi_graph_init(struct atmel_isi *isi)
-{
-	int ret;
-
-	/* Parse the graph to extract a list of subdevice DT nodes. */
-	ret = isi_graph_parse(isi, isi->dev->of_node);
-	if (ret < 0) {
-		dev_err(isi->dev, "Graph parsing failed\n");
-		return ret;
-	}
-
 	v4l2_async_notifier_init(&isi->notifier);
 
-	ret = v4l2_async_notifier_add_subdev(&isi->notifier, &isi->entity.asd);
-	if (ret) {
-		of_node_put(isi->entity.node);
-		return ret;
-	}
+	asd = v4l2_async_notifier_add_fwnode_remote_subdev(
+						&isi->notifier,
+						of_fwnode_handle(ep),
+						struct v4l2_async_subdev);
+	of_node_put(ep);
+
+	if (IS_ERR(asd))
+		return PTR_ERR(asd);
 
 	isi->notifier.ops = &isi_graph_notify_ops;
 
@@ -1345,4 +1363,3 @@ module_platform_driver(atmel_isi_driver);
 MODULE_AUTHOR("Josh Wu <josh.wu@atmel.com>");
 MODULE_DESCRIPTION("The V4L2 driver for Atmel Linux");
 MODULE_LICENSE("GPL");
-MODULE_SUPPORTED_DEVICE("video");

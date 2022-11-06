@@ -579,8 +579,6 @@ static int rpr0521_buffer_postdisable(struct iio_dev *indio_dev)
 
 static const struct iio_buffer_setup_ops rpr0521_buffer_setup_ops = {
 	.preenable = rpr0521_buffer_preenable,
-	.postenable = iio_triggered_buffer_postenable,
-	.predisable = iio_triggered_buffer_predisable,
 	.postdisable = rpr0521_buffer_postdisable,
 };
 
@@ -957,7 +955,6 @@ static int rpr0521_probe(struct i2c_client *client,
 
 	mutex_init(&data->lock);
 
-	indio_dev->dev.parent = &client->dev;
 	indio_dev->info = &rpr0521_info;
 	indio_dev->name = RPR0521_DRV_NAME;
 	indio_dev->channels = rpr0521_channels;
@@ -993,7 +990,6 @@ static int rpr0521_probe(struct i2c_client *client,
 			ret = -ENOMEM;
 			goto err_pm_disable;
 		}
-		data->drdy_trigger0->dev.parent = indio_dev->dev.parent;
 		data->drdy_trigger0->ops = &rpr0521_trigger_ops;
 		indio_dev->available_scan_masks = rpr0521_available_scan_masks;
 		iio_trigger_set_drvdata(data->drdy_trigger0, indio_dev);

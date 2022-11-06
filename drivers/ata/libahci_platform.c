@@ -326,7 +326,7 @@ static int ahci_platform_get_phy(struct ahci_host_priv *hpriv, u32 port,
 				node);
 			break;
 		}
-		/* fall through */
+		fallthrough;
 	case -ENODEV:
 		/* continue normally */
 		hpriv->phys[port] = NULL;
@@ -582,11 +582,13 @@ int ahci_platform_init_host(struct platform_device *pdev,
 	int i, irq, n_ports, rc;
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq <= 0) {
+	if (irq < 0) {
 		if (irq != -EPROBE_DEFER)
 			dev_err(dev, "no irq\n");
 		return irq;
 	}
+	if (!irq)
+		return -EINVAL;
 
 	hpriv->irq = irq;
 

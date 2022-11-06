@@ -73,6 +73,7 @@ struct i40iw_pd_ops;
 struct i40iw_priv_qp_ops;
 struct i40iw_priv_cq_ops;
 struct i40iw_hmc_ops;
+struct pci_dev;
 
 enum i40iw_page_size {
 	I40IW_PAGE_SIZE_4K,
@@ -234,6 +235,11 @@ enum i40iw_hw_stats_index_64b {
 	I40IW_HW_STAT_INDEX_MAX_64
 };
 
+enum i40iw_feature_type {
+	I40IW_FEATURE_FW_INFO = 0,
+	I40IW_MAX_FEATURES
+};
+
 struct i40iw_dev_hw_stats_offsets {
 	u32 stats_offset_32[I40IW_HW_STAT_INDEX_MAX_32];
 	u32 stats_offset_64[I40IW_HW_STAT_INDEX_MAX_64];
@@ -256,7 +262,7 @@ struct i40iw_vsi_pestat {
 
 struct i40iw_hw {
 	u8 __iomem *hw_addr;
-	void *dev_context;
+	struct pci_dev *pcidev;
 	struct i40iw_hmc_info hmc;
 };
 
@@ -381,7 +387,6 @@ struct i40iw_sc_qp {
 	u8 *q2_buf;
 	u64 qp_compl_ctx;
 	u16 qs_handle;
-	u16 push_idx;
 	u8 sq_tph_val;
 	u8 rq_tph_val;
 	u8 qp_state;
@@ -487,20 +492,21 @@ struct i40iw_sc_dev {
 	struct i40iw_sc_aeq *aeq;
 	struct i40iw_sc_ceq *ceq[I40IW_CEQ_MAX_COUNT];
 	struct i40iw_sc_cq *ccq;
-	struct i40iw_cqp_ops *cqp_ops;
-	struct i40iw_ccq_ops *ccq_ops;
-	struct i40iw_ceq_ops *ceq_ops;
-	struct i40iw_aeq_ops *aeq_ops;
-	struct i40iw_pd_ops *iw_pd_ops;
-	struct i40iw_priv_qp_ops *iw_priv_qp_ops;
-	struct i40iw_priv_cq_ops *iw_priv_cq_ops;
-	struct i40iw_mr_ops *mr_ops;
-	struct i40iw_cqp_misc_ops *cqp_misc_ops;
-	struct i40iw_hmc_ops *hmc_ops;
+	const struct i40iw_cqp_ops *cqp_ops;
+	const struct i40iw_ccq_ops *ccq_ops;
+	const struct i40iw_ceq_ops *ceq_ops;
+	const struct i40iw_aeq_ops *aeq_ops;
+	const struct i40iw_pd_ops *iw_pd_ops;
+	const struct i40iw_priv_qp_ops *iw_priv_qp_ops;
+	const struct i40iw_priv_cq_ops *iw_priv_cq_ops;
+	const struct i40iw_mr_ops *mr_ops;
+	const struct i40iw_cqp_misc_ops *cqp_misc_ops;
+	const struct i40iw_hmc_ops *hmc_ops;
 	struct i40iw_vchnl_if vchnl_if;
 	const struct i40iw_vf_cqp_ops *iw_vf_cqp_ops;
 
 	struct i40iw_hmc_fpm_misc hmc_fpm_misc;
+	u64 feature_info[I40IW_MAX_FEATURES];
 	u32 debug_mask;
 	u8 hmc_fn_id;
 	bool is_pf;
@@ -742,8 +748,6 @@ struct i40iw_qp_host_ctx_info {
 	struct i40iwarp_offload_info *iwarp_info;
 	u32 send_cq_num;
 	u32 rcv_cq_num;
-	u16 push_idx;
-	bool push_mode_en;
 	bool tcp_info_valid;
 	bool iwarp_info_valid;
 	bool err_rq_idx_valid;
@@ -930,12 +934,6 @@ struct i40iw_local_mac_ipaddr_entry_info {
 	u8 entry_idx;
 };
 
-struct i40iw_cqp_manage_push_page_info {
-	u32 push_idx;
-	u16 qs_handle;
-	u8 free_page;
-};
-
 struct i40iw_qp_flush_info {
 	u16 sq_minor_code;
 	u16 sq_major_code;
@@ -1107,9 +1105,6 @@ struct i40iw_mr_ops {
 };
 
 struct i40iw_cqp_misc_ops {
-	enum i40iw_status_code (*manage_push_page)(struct i40iw_sc_cqp *,
-						   struct i40iw_cqp_manage_push_page_info *,
-						   u64, bool);
 	enum i40iw_status_code (*manage_hmc_pm_func_table)(struct i40iw_sc_cqp *,
 							   u64, u8, bool, bool);
 	enum i40iw_status_code (*set_hmc_resource_profile)(struct i40iw_sc_cqp *,
@@ -1247,12 +1242,6 @@ struct cqp_info {
 		} manage_vf_pble_bp;
 
 		struct {
-			struct i40iw_sc_cqp *cqp;
-			struct i40iw_cqp_manage_push_page_info info;
-			u64 scratch;
-		} manage_push_page;
-
-		struct {
 			struct i40iw_sc_dev *dev;
 			struct i40iw_upload_context_info info;
 			u64 scratch;
@@ -1340,6 +1329,12 @@ struct cqp_info {
 			struct i40iw_sc_qp *qp;
 			u64 scratch;
 		} suspend_resume;
+		struct {
+			struct i40iw_sc_cqp *cqp;
+			void *cap_va;
+			u64 cap_pa;
+			u64 scratch;
+		} query_rdma_features;
 	} u;
 };
 

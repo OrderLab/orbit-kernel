@@ -11,7 +11,6 @@
 #include <linux/device.h>
 #include <linux/kref.h>
 #include <linux/list.h>
-#include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/debugfs.h>
@@ -66,7 +65,6 @@ struct master {
 	const struct component_master_ops *ops;
 	struct device *dev;
 	struct component_match *match;
-	struct dentry *dentry;
 };
 
 struct component {
@@ -126,15 +124,13 @@ core_initcall(component_debug_init);
 
 static void component_master_debugfs_add(struct master *m)
 {
-	m->dentry = debugfs_create_file(dev_name(m->dev), 0444,
-					component_debugfs_dir,
-					m, &component_devices_fops);
+	debugfs_create_file(dev_name(m->dev), 0444, component_debugfs_dir, m,
+			    &component_devices_fops);
 }
 
 static void component_master_debugfs_del(struct master *m)
 {
-	debugfs_remove(m->dentry);
-	m->dentry = NULL;
+	debugfs_remove(debugfs_lookup(dev_name(m->dev), component_debugfs_dir));
 }
 
 #else
@@ -530,7 +526,8 @@ static void component_unbind(struct component *component,
 {
 	WARN_ON(!component->bound);
 
-	component->ops->unbind(component->dev, master->dev, data);
+	if (component->ops && component->ops->unbind)
+		component->ops->unbind(component->dev, master->dev, data);
 	component->bound = false;
 
 	/* Release all resources claimed in the binding of this component */
@@ -777,5 +774,3 @@ void component_del(struct device *dev, const struct component_ops *ops)
 	kfree(component);
 }
 EXPORT_SYMBOL_GPL(component_del);
-
-MODULE_LICENSE("GPL v2");

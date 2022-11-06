@@ -1,65 +1,9 @@
-/******************************************************************************
- *
- * This file is provided under a dual BSD/GPLv2 license.  When using or
- * redistributing this file, you may do so under either license.
- *
- * GPL LICENSE SUMMARY
- *
- * Copyright(c) 2005 - 2014 Intel Corporation. All rights reserved.
- * Copyright(c) 2013 - 2014 Intel Mobile Communications GmbH
- * Copyright(c) 2016        Intel Deutschland GmbH
- * Copyright(c) 2018 - 2019 Intel Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * The full GNU General Public License is included in this distribution
- * in the file called COPYING.
- *
- * Contact Information:
- *  Intel Linux Wireless <linuxwifi@intel.com>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- *
- * BSD LICENSE
- *
- * Copyright(c) 2005 - 2014 Intel Corporation. All rights reserved.
- * Copyright(c) 2013 - 2014 Intel Mobile Communications GmbH
- * Copyright(c) 2018 - 2019 Intel Corporation
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- *  * Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  * Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *  * Neither the name Intel Corporation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- *****************************************************************************/
+/* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
+/*
+ * Copyright (C) 2005-2014, 2018-2020 Intel Corporation
+ * Copyright (C) 2013-2014 Intel Mobile Communications GmbH
+ * Copyright (C) 2016 Intel Deutschland GmbH
+ */
 #ifndef __iwl_csr_h__
 #define __iwl_csr_h__
 /*
@@ -266,6 +210,7 @@
 /* RESET */
 #define CSR_RESET_REG_FLAG_NEVO_RESET                (0x00000001)
 #define CSR_RESET_REG_FLAG_FORCE_NMI                 (0x00000002)
+#define CSR_RESET_REG_FLAG_SW_RESET		     (0x00000080)
 #define CSR_RESET_REG_FLAG_MASTER_DISABLED           (0x00000100)
 #define CSR_RESET_REG_FLAG_STOP_MASTER               (0x00000200)
 #define CSR_RESET_LINK_PWR_MGMT_DISABLED             (0x80000000)
@@ -288,10 +233,34 @@
  *     4:  GOING_TO_SLEEP
  *         Indicates MAC is entering a power-saving sleep power-down.
  *         Not a good time to access device-internal resources.
+ *     3:  MAC_ACCESS_REQ
+ *         Host sets this to request and maintain MAC wakeup, to allow host
+ *         access to device-internal resources.  Host must wait for
+ *         MAC_CLOCK_READY (and !GOING_TO_SLEEP) before accessing non-CSR
+ *         device registers.
+ *     2:  INIT_DONE
+ *         Host sets this to put device into fully operational D0 power mode.
+ *         Host resets this after SW_RESET to put device into low power mode.
+ *     0:  MAC_CLOCK_READY
+ *         Indicates MAC (ucode processor, etc.) is powered up and can run.
+ *         Internal resources are accessible.
+ *         NOTE:  This does not indicate that the processor is actually running.
+ *         NOTE:  This does not indicate that device has completed
+ *                init or post-power-down restore of internal SRAM memory.
+ *                Use CSR_UCODE_DRV_GP1_BIT_MAC_SLEEP as indication that
+ *                SRAM is restored and uCode is in normal operation mode.
+ *                Later devices (5xxx/6xxx/1xxx) use non-volatile SRAM, and
+ *                do not need to save/restore it.
+ *         NOTE:  After device reset, this bit remains "0" until host sets
+ *                INIT_DONE
  */
+#define CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY	     (0x00000001)
 #define CSR_GP_CNTRL_REG_FLAG_INIT_DONE		     (0x00000004)
-#define CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP         (0x00000010)
+#define CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ	     (0x00000008)
+#define CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP	     (0x00000010)
 #define CSR_GP_CNTRL_REG_FLAG_XTAL_ON		     (0x00000400)
+
+#define CSR_GP_CNTRL_REG_VAL_MAC_ACCESS_EN	     (0x00000001)
 
 #define CSR_GP_CNTRL_REG_MSK_POWER_SAVE_TYPE         (0x07000000)
 #define CSR_GP_CNTRL_REG_FLAG_RFKILL_WAKE_L1A_EN     (0x04000000)
@@ -308,6 +277,8 @@
 #define CSR_HW_RFID_DASH(_val)         (((_val) & 0x00000F0) >> 4)
 #define CSR_HW_RFID_STEP(_val)         (((_val) & 0x0000F00) >> 8)
 #define CSR_HW_RFID_TYPE(_val)         (((_val) & 0x0FFF000) >> 12)
+#define CSR_HW_RFID_IS_CDB(_val)       (((_val) & 0x10000000) >> 28)
+#define CSR_HW_RFID_IS_JACKET(_val)    (((_val) & 0x20000000) >> 29)
 
 /**
  *  hw_rev values
@@ -389,7 +360,7 @@ enum {
 
 
 /* CSR GIO */
-#define CSR_GIO_REG_VAL_L0S_ENABLED	(0x00000002)
+#define CSR_GIO_REG_VAL_L0S_DISABLED	(0x00000002)
 
 /*
  * UCODE-DRIVER GP (general purpose) mailbox register 1
@@ -607,15 +578,17 @@ enum msix_fh_int_causes {
 	MSIX_FH_INT_CAUSES_FH_ERR		= BIT(21),
 };
 
+/* The low 16 bits are for rx data queue indication */
+#define MSIX_FH_INT_CAUSES_DATA_QUEUE 0xffff
+
 /*
  * Causes for the HW register interrupts
  */
 enum msix_hw_int_causes {
 	MSIX_HW_INT_CAUSES_REG_ALIVE		= BIT(0),
 	MSIX_HW_INT_CAUSES_REG_WAKEUP		= BIT(1),
-	MSIX_HW_INT_CAUSES_REG_IPC		= BIT(1),
-	MSIX_HW_INT_CAUSES_REG_IML              = BIT(2),
-	MSIX_HW_INT_CAUSES_REG_SW_ERR_V2	= BIT(5),
+	MSIX_HW_INT_CAUSES_REG_IML              = BIT(1),
+	MSIX_HW_INT_CAUSES_REG_RESET_DONE	= BIT(2),
 	MSIX_HW_INT_CAUSES_REG_CT_KILL		= BIT(6),
 	MSIX_HW_INT_CAUSES_REG_RF_KILL		= BIT(7),
 	MSIX_HW_INT_CAUSES_REG_PERIODIC		= BIT(8),

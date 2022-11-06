@@ -181,7 +181,7 @@ static enum i40iw_status_code i40iw_sc_parse_fpm_commit_buf(
  * i40iw_sc_decode_fpm_query() - Decode a 64 bit value into max count and size
  * @buf: ptr to fpm query buffer
  * @buf_idx: index into buf
- * @info: ptr to i40iw_hmc_obj_info struct
+ * @obj_info: ptr to i40iw_hmc_obj_info struct
  * @rsrc_idx: resource index into info
  *
  * Decode a 64 bit value from fpm query buffer into max count and size
@@ -205,7 +205,7 @@ static u64 i40iw_sc_decode_fpm_query(u64 *buf,
 /**
  * i40iw_sc_parse_fpm_query_buf() - parses fpm query buffer
  * @buf: ptr to fpm query buffer
- * @info: ptr to i40iw_hmc_obj_info struct
+ * @hmc_info: ptr to i40iw_hmc_obj_info struct
  * @hmc_fpm_misc: ptr to fpm data
  *
  * parses fpm query buffer and copy max_cnt and
@@ -775,7 +775,7 @@ static enum i40iw_status_code i40iw_sc_ccq_get_cqe_info(
  * i40iw_sc_poll_for_cqp_op_done - Waits for last write to complete in CQP SQ
  * @cqp: struct for cqp hw
  * @op_code: cqp opcode for completion
- * @info: completion q entry to return
+ * @compl_info: completion q entry to return
  */
 static enum i40iw_status_code i40iw_sc_poll_for_cqp_op_done(
 					struct i40iw_sc_cqp *cqp,
@@ -817,46 +817,6 @@ static enum i40iw_status_code i40iw_sc_poll_for_cqp_op_done(
 		memcpy(compl_info, &info, sizeof(*compl_info));
 
 	return ret_code;
-}
-
-/**
- * i40iw_sc_manage_push_page - Handle push page
- * @cqp: struct for cqp hw
- * @info: push page info
- * @scratch: u64 saved to be used during cqp completion
- * @post_sq: flag for cqp db to ring
- */
-static enum i40iw_status_code i40iw_sc_manage_push_page(
-				struct i40iw_sc_cqp *cqp,
-				struct i40iw_cqp_manage_push_page_info *info,
-				u64 scratch,
-				bool post_sq)
-{
-	u64 *wqe;
-	u64 header;
-
-	if (info->push_idx >= I40IW_MAX_PUSH_PAGE_COUNT)
-		return I40IW_ERR_INVALID_PUSH_PAGE_INDEX;
-
-	wqe = i40iw_sc_cqp_get_next_send_wqe(cqp, scratch);
-	if (!wqe)
-		return I40IW_ERR_RING_FULL;
-
-	set_64bit_val(wqe, 16, info->qs_handle);
-
-	header = LS_64(info->push_idx, I40IW_CQPSQ_MPP_PPIDX) |
-		 LS_64(I40IW_CQP_OP_MANAGE_PUSH_PAGES, I40IW_CQPSQ_OPCODE) |
-		 LS_64(cqp->polarity, I40IW_CQPSQ_WQEVALID) |
-		 LS_64(info->free_page, I40IW_CQPSQ_MPP_FREE_PAGE);
-
-	i40iw_insert_wqe_hdr(wqe, header);
-
-	i40iw_debug_buf(cqp->dev, I40IW_DEBUG_WQE, "MANAGE_PUSH_PAGES WQE",
-			wqe, I40IW_CQP_WQE_SIZE * 8);
-
-	if (post_sq)
-		i40iw_sc_cqp_post_sq(cqp);
-	return 0;
 }
 
 /**
@@ -973,7 +933,7 @@ static enum i40iw_status_code i40iw_sc_commit_fpm_values_done(struct i40iw_sc_cq
  * @cqp: struct for cqp hw
  * @scratch: u64 saved to be used during cqp completion
  * @hmc_fn_id: hmc function id
- * @commit_fpm_mem; Memory for fpm values
+ * @commit_fpm_mem: Memory for fpm values
  * @post_sq: flag for cqp db to ring
  * @wait_type: poll ccq or cqp registers for cqp completion
  */
@@ -1017,6 +977,95 @@ static enum i40iw_status_code i40iw_sc_commit_fpm_values(
 		else if (wait_type == I40IW_CQP_WAIT_POLL_CQ)
 			ret_code = i40iw_sc_commit_fpm_values_done(cqp);
 	}
+
+	return ret_code;
+}
+
+/**
+ * i40iw_sc_query_rdma_features_done - poll cqp for query features done
+ * @cqp: struct for cqp hw
+ */
+static enum i40iw_status_code
+i40iw_sc_query_rdma_features_done(struct i40iw_sc_cqp *cqp)
+{
+	return i40iw_sc_poll_for_cqp_op_done(
+		cqp, I40IW_CQP_OP_QUERY_RDMA_FEATURES, NULL);
+}
+
+/**
+ * i40iw_sc_query_rdma_features - query rdma features
+ * @cqp: struct for cqp hw
+ * @feat_mem: holds PA for HW to use
+ * @scratch: u64 saved to be used during cqp completion
+ */
+static enum i40iw_status_code
+i40iw_sc_query_rdma_features(struct i40iw_sc_cqp *cqp,
+			     struct i40iw_dma_mem *feat_mem, u64 scratch)
+{
+	u64 *wqe;
+	u64 header;
+
+	wqe = i40iw_sc_cqp_get_next_send_wqe(cqp, scratch);
+	if (!wqe)
+		return I40IW_ERR_RING_FULL;
+
+	set_64bit_val(wqe, 32, feat_mem->pa);
+
+	header = LS_64(I40IW_CQP_OP_QUERY_RDMA_FEATURES, I40IW_CQPSQ_OPCODE) |
+		 LS_64(cqp->polarity, I40IW_CQPSQ_WQEVALID) | feat_mem->size;
+
+	i40iw_insert_wqe_hdr(wqe, header);
+
+	i40iw_debug_buf(cqp->dev, I40IW_DEBUG_WQE, "QUERY RDMA FEATURES WQE",
+			wqe, I40IW_CQP_WQE_SIZE * 8);
+
+	i40iw_sc_cqp_post_sq(cqp);
+
+	return 0;
+}
+
+/**
+ * i40iw_get_rdma_features - get RDMA features
+ * @dev: sc device struct
+ */
+enum i40iw_status_code i40iw_get_rdma_features(struct i40iw_sc_dev *dev)
+{
+	enum i40iw_status_code ret_code;
+	struct i40iw_dma_mem feat_buf;
+	u64 temp;
+	u16 byte_idx, feat_type, feat_cnt;
+
+	ret_code = i40iw_allocate_dma_mem(dev->hw, &feat_buf,
+					  I40IW_FEATURE_BUF_SIZE,
+					  I40IW_FEATURE_BUF_ALIGNMENT);
+
+	if (ret_code)
+		return I40IW_ERR_NO_MEMORY;
+
+	ret_code = i40iw_sc_query_rdma_features(dev->cqp, &feat_buf, 0);
+	if (!ret_code)
+		ret_code = i40iw_sc_query_rdma_features_done(dev->cqp);
+
+	if (ret_code)
+		goto exit;
+
+	get_64bit_val(feat_buf.va, 0, &temp);
+	feat_cnt = RS_64(temp, I40IW_FEATURE_CNT);
+	if (feat_cnt < I40IW_MAX_FEATURES) {
+		ret_code = I40IW_ERR_INVALID_FEAT_CNT;
+		goto exit;
+	} else if (feat_cnt > I40IW_MAX_FEATURES) {
+		i40iw_debug(dev, I40IW_DEBUG_CQP,
+			    "features buf size insufficient\n");
+	}
+
+	for (byte_idx = 0, feat_type = 0; feat_type < I40IW_MAX_FEATURES;
+	     feat_type++, byte_idx += 8) {
+		get_64bit_val((u64 *)feat_buf.va, byte_idx, &temp);
+		dev->feature_info[feat_type] = RS_64(temp, I40IW_FEATURE_INFO);
+	}
+exit:
+	i40iw_free_dma_mem(dev->hw, &feat_buf);
 
 	return ret_code;
 }
@@ -1407,7 +1456,7 @@ static enum i40iw_status_code i40iw_sc_add_local_mac_ipaddr_entry(
  * @cqp: struct for cqp hw
  * @scratch: u64 saved to be used during cqp completion
  * @entry_idx: index of mac entry
- * @ ignore_ref_count: to force mac adde delete
+ * @ignore_ref_count: to force mac adde delete
  * @post_sq: flag for cqp db to ring
  */
 static enum i40iw_status_code i40iw_sc_del_local_mac_ipaddr_entry(
@@ -1875,7 +1924,6 @@ static enum i40iw_status_code i40iw_sc_get_next_aeqe(struct i40iw_sc_aeq *aeq,
 		info->out_rdrsp = true;
 		break;
 	case I40IW_AE_SOURCE_RSVD:
-		/* fallthrough */
 	default:
 		break;
 	}
@@ -2256,7 +2304,7 @@ static enum i40iw_status_code i40iw_sc_cq_destroy(struct i40iw_sc_cq *cq,
  * i40iw_sc_cq_modify - modify a Completion Queue
  * @cq: cq struct
  * @info: modification info struct
- * @scratch:
+ * @scratch: u64 saved to be used during cqp completion
  * @post_sq: flag to post to sq
  */
 static enum i40iw_status_code i40iw_sc_cq_modify(struct i40iw_sc_cq *cq,
@@ -2771,9 +2819,7 @@ static enum i40iw_status_code i40iw_sc_qp_setctx(
 	      LS_64(qp->rcv_tph_en, I40IWQPC_RCVTPHEN) |
 	      LS_64(qp->xmit_tph_en, I40IWQPC_XMITTPHEN) |
 	      LS_64(qp->rq_tph_en, I40IWQPC_RQTPHEN) |
-	      LS_64(qp->sq_tph_en, I40IWQPC_SQTPHEN) |
-	      LS_64(info->push_idx, I40IWQPC_PPIDX) |
-	      LS_64(info->push_mode_en, I40IWQPC_PMENA);
+	      LS_64(qp->sq_tph_en, I40IWQPC_SQTPHEN);
 
 	set_64bit_val(qp_ctx, 8, qp->sq_pa);
 	set_64bit_val(qp_ctx, 16, qp->rq_pa);
@@ -3627,7 +3673,7 @@ static enum i40iw_status_code i40iw_sc_configure_iw_fpm(struct i40iw_sc_dev *dev
 /**
  * cqp_sds_wqe_fill - fill cqp wqe doe sd
  * @cqp: struct for cqp hw
- * @info; sd info for wqe
+ * @info: sd info for wqe
  * @scratch: u64 saved to be used during cqp completion
  */
 static enum i40iw_status_code cqp_sds_wqe_fill(struct i40iw_sc_cqp *cqp,
@@ -3673,14 +3719,14 @@ static enum i40iw_status_code cqp_sds_wqe_fill(struct i40iw_sc_cqp *cqp,
 					LS_64(1, I40IW_CQPSQ_UPESD_ENTRY_VALID)));
 
 		set_64bit_val(wqe, 56, info->entry[2].data);
-		/* fallthrough */
+		fallthrough;
 	case 2:
 		set_64bit_val(wqe, 32,
 			      (LS_64(info->entry[1].cmd, I40IW_CQPSQ_UPESD_SDCMD) |
 					LS_64(1, I40IW_CQPSQ_UPESD_ENTRY_VALID)));
 
 		set_64bit_val(wqe, 40, info->entry[1].data);
-		/* fallthrough */
+		fallthrough;
 	case 1:
 		set_64bit_val(wqe, 0,
 			      LS_64(info->entry[0].cmd, I40IW_CQPSQ_UPESD_SDCMD));
@@ -4203,13 +4249,6 @@ static enum i40iw_status_code i40iw_exec_cqp_cmd(struct i40iw_sc_dev *dev,
 				pcmdinfo->in.u.add_arp_cache_entry.scratch,
 				pcmdinfo->post_sq);
 		break;
-	case OP_MANAGE_PUSH_PAGE:
-		status = i40iw_sc_manage_push_page(
-				pcmdinfo->in.u.manage_push_page.cqp,
-				&pcmdinfo->in.u.manage_push_page.info,
-				pcmdinfo->in.u.manage_push_page.scratch,
-				pcmdinfo->post_sq);
-		break;
 	case OP_UPDATE_PE_SDS:
 		/* case I40IW_CQP_OP_UPDATE_PE_SDS */
 		status = i40iw_update_pe_sds(
@@ -4264,6 +4303,13 @@ static enum i40iw_status_code i40iw_exec_cqp_cmd(struct i40iw_sc_dev *dev,
 				&values_mem,
 				true,
 				I40IW_CQP_WAIT_EVENT);
+		break;
+	case OP_QUERY_RDMA_FEATURES:
+		values_mem.pa = pcmdinfo->in.u.query_rdma_features.cap_pa;
+		values_mem.va = pcmdinfo->in.u.query_rdma_features.cap_va;
+		status = i40iw_sc_query_rdma_features(
+			pcmdinfo->in.u.query_rdma_features.cqp, &values_mem,
+			pcmdinfo->in.u.query_rdma_features.scratch);
 		break;
 	default:
 		status = I40IW_NOT_SUPPORTED;
@@ -4838,7 +4884,7 @@ void i40iw_hw_stats_init(struct i40iw_vsi_pestat *stats, u8 fcn_idx, bool is_pf)
 
 /**
  * i40iw_hw_stats_read_32 - Read 32-bit HW stats counters and accommodates for roll-overs.
- * @stat: pestat struct
+ * @stats: pestat struct
  * @index: index in HW stats table which contains offset reg-addr
  * @value: hw stats value
  */
@@ -5003,7 +5049,7 @@ void i40iw_vsi_stats_free(struct i40iw_sc_vsi *vsi)
 	i40iw_hw_stats_stop_timer(vsi);
 }
 
-static struct i40iw_cqp_ops iw_cqp_ops = {
+static const struct i40iw_cqp_ops iw_cqp_ops = {
 	.cqp_init = i40iw_sc_cqp_init,
 	.cqp_create = i40iw_sc_cqp_create,
 	.cqp_post_sq = i40iw_sc_cqp_post_sq,
@@ -5012,7 +5058,7 @@ static struct i40iw_cqp_ops iw_cqp_ops = {
 	.poll_for_cqp_op_done = i40iw_sc_poll_for_cqp_op_done
 };
 
-static struct i40iw_ccq_ops iw_ccq_ops = {
+static const struct i40iw_ccq_ops iw_ccq_ops = {
 	.ccq_init = i40iw_sc_ccq_init,
 	.ccq_create = i40iw_sc_ccq_create,
 	.ccq_destroy = i40iw_sc_ccq_destroy,
@@ -5021,7 +5067,7 @@ static struct i40iw_ccq_ops iw_ccq_ops = {
 	.ccq_arm = i40iw_sc_ccq_arm
 };
 
-static struct i40iw_ceq_ops iw_ceq_ops = {
+static const struct i40iw_ceq_ops iw_ceq_ops = {
 	.ceq_init = i40iw_sc_ceq_init,
 	.ceq_create = i40iw_sc_ceq_create,
 	.cceq_create_done = i40iw_sc_cceq_create_done,
@@ -5031,7 +5077,7 @@ static struct i40iw_ceq_ops iw_ceq_ops = {
 	.process_ceq = i40iw_sc_process_ceq
 };
 
-static struct i40iw_aeq_ops iw_aeq_ops = {
+static const struct i40iw_aeq_ops iw_aeq_ops = {
 	.aeq_init = i40iw_sc_aeq_init,
 	.aeq_create = i40iw_sc_aeq_create,
 	.aeq_destroy = i40iw_sc_aeq_destroy,
@@ -5042,11 +5088,11 @@ static struct i40iw_aeq_ops iw_aeq_ops = {
 };
 
 /* iwarp pd ops */
-static struct i40iw_pd_ops iw_pd_ops = {
+static const struct i40iw_pd_ops iw_pd_ops = {
 	.pd_init = i40iw_sc_pd_init,
 };
 
-static struct i40iw_priv_qp_ops iw_priv_qp_ops = {
+static const struct i40iw_priv_qp_ops iw_priv_qp_ops = {
 	.qp_init = i40iw_sc_qp_init,
 	.qp_create = i40iw_sc_qp_create,
 	.qp_modify = i40iw_sc_qp_modify,
@@ -5061,14 +5107,14 @@ static struct i40iw_priv_qp_ops iw_priv_qp_ops = {
 	.iw_mr_fast_register = i40iw_sc_mr_fast_register
 };
 
-static struct i40iw_priv_cq_ops iw_priv_cq_ops = {
+static const struct i40iw_priv_cq_ops iw_priv_cq_ops = {
 	.cq_init = i40iw_sc_cq_init,
 	.cq_create = i40iw_sc_cq_create,
 	.cq_destroy = i40iw_sc_cq_destroy,
 	.cq_modify = i40iw_sc_cq_modify,
 };
 
-static struct i40iw_mr_ops iw_mr_ops = {
+static const struct i40iw_mr_ops iw_mr_ops = {
 	.alloc_stag = i40iw_sc_alloc_stag,
 	.mr_reg_non_shared = i40iw_sc_mr_reg_non_shared,
 	.mr_reg_shared = i40iw_sc_mr_reg_shared,
@@ -5077,8 +5123,7 @@ static struct i40iw_mr_ops iw_mr_ops = {
 	.mw_alloc = i40iw_sc_mw_alloc
 };
 
-static struct i40iw_cqp_misc_ops iw_cqp_misc_ops = {
-	.manage_push_page = i40iw_sc_manage_push_page,
+static const struct i40iw_cqp_misc_ops iw_cqp_misc_ops = {
 	.manage_hmc_pm_func_table = i40iw_sc_manage_hmc_pm_func_table,
 	.set_hmc_resource_profile = i40iw_sc_set_hmc_resource_profile,
 	.commit_fpm_values = i40iw_sc_commit_fpm_values,
@@ -5100,7 +5145,7 @@ static struct i40iw_cqp_misc_ops iw_cqp_misc_ops = {
 	.update_resume_qp = i40iw_sc_resume_qp
 };
 
-static struct i40iw_hmc_ops iw_hmc_ops = {
+static const struct i40iw_hmc_ops iw_hmc_ops = {
 	.init_iw_hmc = i40iw_sc_init_iw_hmc,
 	.parse_fpm_query_buf = i40iw_sc_parse_fpm_query_buf,
 	.configure_iw_fpm = i40iw_sc_configure_iw_fpm,

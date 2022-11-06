@@ -26,11 +26,6 @@
 MODULE_DESCRIPTION(CRD_NAME);
 MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_LICENSE("GPL");
-MODULE_SUPPORTED_DEVICE("{{ESS,ES688 PnP AudioDrive,pnp:ESS0100},"
-	        "{ESS,ES1688 PnP AudioDrive,pnp:ESS0102},"
-	        "{ESS,ES688 AudioDrive,pnp:ESS6881},"
-	        "{ESS,ES1688 AudioDrive,pnp:ESS1681}}");
-
 MODULE_ALIAS("snd_es968");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
@@ -84,9 +79,9 @@ static int snd_es1688_legacy_create(struct snd_card *card,
 				    struct device *dev, unsigned int n)
 {
 	struct snd_es1688 *chip = card->private_data;
-	static long possible_ports[] = {0x220, 0x240, 0x260};
-	static int possible_irqs[] = {5, 9, 10, 7, -1};
-	static int possible_dmas[] = {1, 3, 0, -1};
+	static const long possible_ports[] = {0x220, 0x240, 0x260};
+	static const int possible_irqs[] = {5, 9, 10, 7, -1};
+	static const int possible_dmas[] = {1, 3, 0, -1};
 
 	int i, error;
 
@@ -133,8 +128,8 @@ static int snd_es1688_probe(struct snd_card *card, unsigned int n)
 	if (error < 0)
 		return error;
 
-	strlcpy(card->driver, "ES1688", sizeof(card->driver));
-	strlcpy(card->shortname, chip->pcm->name, sizeof(card->shortname));
+	strscpy(card->driver, "ES1688", sizeof(card->driver));
+	strscpy(card->shortname, chip->pcm->name, sizeof(card->shortname));
 	snprintf(card->longname, sizeof(card->longname),
 		"%s at 0x%lx, irq %i, dma %i", chip->pcm->name, chip->port,
 		 chip->irq, chip->dma8);
@@ -192,10 +187,9 @@ out:
 	return error;
 }
 
-static int snd_es1688_isa_remove(struct device *dev, unsigned int n)
+static void snd_es1688_isa_remove(struct device *dev, unsigned int n)
 {
 	snd_card_free(dev_get_drvdata(dev));
-	return 0;
 }
 
 static struct isa_driver snd_es1688_driver = {

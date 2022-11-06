@@ -8,7 +8,7 @@ title: Allwinner A10 Timer Device Tree Bindings
 
 maintainers:
   - Chen-Yu Tsai <wens@csie.org>
-  - Maxime Ripard <maxime.ripard@bootlin.com>
+  - Maxime Ripard <mripard@kernel.org>
 
 properties:
   compatible:
@@ -22,6 +22,8 @@ properties:
     maxItems: 1
 
   interrupts:
+    minItems: 2
+    maxItems: 6
     description:
       List of timers interrupts
 
@@ -87,7 +89,7 @@ additionalProperties: false
 
 examples:
   - |
-    timer {
+    timer@1c20c00 {
         compatible = "allwinner,sun4i-a10-timer";
         reg = <0x01c20c00 0x400>;
         interrupts = <22>,

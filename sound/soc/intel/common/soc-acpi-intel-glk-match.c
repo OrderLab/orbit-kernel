@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * soc-acpi-intel-glk-match.c - tables and support for GLK ACPI enumeration.
  *
@@ -43,6 +43,3 @@ struct snd_soc_acpi_mach snd_soc_acpi_intel_glk_machines[] = {
 	{},
 };
 EXPORT_SYMBOL_GPL(snd_soc_acpi_intel_glk_machines);
-
-MODULE_LICENSE("GPL v2");
-MODULE_DESCRIPTION("Intel Common ACPI Match module");

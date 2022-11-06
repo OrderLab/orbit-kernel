@@ -597,7 +597,7 @@ static int hdlcdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 
 	case HDLCDRVCTL_DRIVERNAME:
 		if (s->ops && s->ops->drvname) {
-			strncpy(bi.data.drivername, s->ops->drvname, 
+			strlcpy(bi.data.drivername, s->ops->drvname,
 				sizeof(bi.data.drivername));
 			break;
 		}
@@ -686,8 +686,6 @@ struct net_device *hdlcdrv_register(const struct hdlcdrv_ops *ops,
 	struct net_device *dev;
 	struct hdlcdrv_state *s;
 	int err;
-
-	BUG_ON(ops == NULL);
 
 	if (privsize < sizeof(struct hdlcdrv_state))
 		privsize = sizeof(struct hdlcdrv_state);

@@ -20,6 +20,9 @@
 
 #include <dt-bindings/pwm/pwm.h>
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/pwm.h>
+
 #define MAX_PWMS 1024
 
 static DEFINE_MUTEX(pwm_lookup_lock);
@@ -34,22 +37,12 @@ static struct pwm_device *pwm_to_device(unsigned int pwm)
 	return radix_tree_lookup(&pwm_tree, pwm);
 }
 
-static int alloc_pwms(int pwm, unsigned int count)
+static int alloc_pwms(unsigned int count)
 {
-	unsigned int from = 0;
 	unsigned int start;
 
-	if (pwm >= MAX_PWMS)
-		return -EINVAL;
-
-	if (pwm >= 0)
-		from = pwm;
-
-	start = bitmap_find_next_zero_area(allocated_pwms, MAX_PWMS, from,
+	start = bitmap_find_next_zero_area(allocated_pwms, MAX_PWMS, 0,
 					   count, 0);
-
-	if (pwm >= 0 && start != pwm)
-		return -EEXIST;
 
 	if (start + count > MAX_PWMS)
 		return -ENOSPC;
@@ -112,6 +105,14 @@ static int pwm_device_request(struct pwm_device *pwm, const char *label)
 			module_put(pwm->chip->ops->owner);
 			return err;
 		}
+	}
+
+	if (pwm->chip->ops->get_state) {
+		pwm->chip->ops->get_state(pwm->chip, pwm, &pwm->state);
+		trace_pwm_get(pwm, &pwm->state);
+
+		if (IS_ENABLED(CONFIG_PWM_DEBUG))
+			pwm->last = pwm->state;
 	}
 
 	set_bit(PWMF_REQUESTED, &pwm->flags);
@@ -224,32 +225,39 @@ void *pwm_get_chip_data(struct pwm_device *pwm)
 }
 EXPORT_SYMBOL_GPL(pwm_get_chip_data);
 
-static bool pwm_ops_check(const struct pwm_ops *ops)
+static bool pwm_ops_check(const struct pwm_chip *chip)
 {
+
+	const struct pwm_ops *ops = chip->ops;
+
 	/* driver supports legacy, non-atomic operation */
-	if (ops->config && ops->enable && ops->disable)
-		return true;
+	if (ops->config && ops->enable && ops->disable) {
+		if (IS_ENABLED(CONFIG_PWM_DEBUG))
+			dev_warn(chip->dev,
+				 "Driver needs updating to atomic API\n");
 
-	/* driver supports atomic operation */
-	if (ops->apply)
 		return true;
+	}
 
-	return false;
+	if (!ops->apply)
+		return false;
+
+	if (IS_ENABLED(CONFIG_PWM_DEBUG) && !ops->get_state)
+		dev_warn(chip->dev,
+			 "Please implement the .get_state() callback\n");
+
+	return true;
 }
 
 /**
- * pwmchip_add_with_polarity() - register a new PWM chip
+ * pwmchip_add() - register a new PWM chip
  * @chip: the PWM chip to add
- * @polarity: initial polarity of PWM channels
  *
- * Register a new PWM chip. If chip->base < 0 then a dynamically assigned base
- * will be used. The initial polarity for all channels is specified by the
- * @polarity parameter.
+ * Register a new PWM chip.
  *
  * Returns: 0 on success or a negative error code on failure.
  */
-int pwmchip_add_with_polarity(struct pwm_chip *chip,
-			      enum pwm_polarity polarity)
+int pwmchip_add(struct pwm_chip *chip)
 {
 	struct pwm_device *pwm;
 	unsigned int i;
@@ -258,14 +266,16 @@ int pwmchip_add_with_polarity(struct pwm_chip *chip,
 	if (!chip || !chip->dev || !chip->ops || !chip->npwm)
 		return -EINVAL;
 
-	if (!pwm_ops_check(chip->ops))
+	if (!pwm_ops_check(chip))
 		return -EINVAL;
 
 	mutex_lock(&pwm_lock);
 
-	ret = alloc_pwms(chip->base, chip->npwm);
+	ret = alloc_pwms(chip->npwm);
 	if (ret < 0)
 		goto out;
+
+	chip->base = ret;
 
 	chip->pwms = kcalloc(chip->npwm, sizeof(*pwm), GFP_KERNEL);
 	if (!chip->pwms) {
@@ -273,18 +283,12 @@ int pwmchip_add_with_polarity(struct pwm_chip *chip,
 		goto out;
 	}
 
-	chip->base = ret;
-
 	for (i = 0; i < chip->npwm; i++) {
 		pwm = &chip->pwms[i];
 
 		pwm->chip = chip;
 		pwm->pwm = chip->base + i;
 		pwm->hwpwm = i;
-		pwm->state.polarity = polarity;
-
-		if (chip->ops->get_state)
-			chip->ops->get_state(chip, pwm, &pwm->state);
 
 		radix_tree_insert(&pwm_tree, pwm->pwm, pwm);
 	}
@@ -306,21 +310,6 @@ out:
 		pwmchip_sysfs_export(chip);
 
 	return ret;
-}
-EXPORT_SYMBOL_GPL(pwmchip_add_with_polarity);
-
-/**
- * pwmchip_add() - register a new PWM chip
- * @chip: the PWM chip to add
- *
- * Register a new PWM chip. If chip->base < 0 then a dynamically assigned base
- * will be used. The initial polarity for all channels is normal.
- *
- * Returns: 0 on success or a negative error code on failure.
- */
-int pwmchip_add(struct pwm_chip *chip)
-{
-	return pwmchip_add_with_polarity(chip, PWM_POLARITY_NORMAL);
 }
 EXPORT_SYMBOL_GPL(pwmchip_add);
 
@@ -445,6 +434,107 @@ void pwm_free(struct pwm_device *pwm)
 }
 EXPORT_SYMBOL_GPL(pwm_free);
 
+static void pwm_apply_state_debug(struct pwm_device *pwm,
+				  const struct pwm_state *state)
+{
+	struct pwm_state *last = &pwm->last;
+	struct pwm_chip *chip = pwm->chip;
+	struct pwm_state s1, s2;
+	int err;
+
+	if (!IS_ENABLED(CONFIG_PWM_DEBUG))
+		return;
+
+	/* No reasonable diagnosis possible without .get_state() */
+	if (!chip->ops->get_state)
+		return;
+
+	/*
+	 * *state was just applied. Read out the hardware state and do some
+	 * checks.
+	 */
+
+	chip->ops->get_state(chip, pwm, &s1);
+	trace_pwm_get(pwm, &s1);
+
+	/*
+	 * The lowlevel driver either ignored .polarity (which is a bug) or as
+	 * best effort inverted .polarity and fixed .duty_cycle respectively.
+	 * Undo this inversion and fixup for further tests.
+	 */
+	if (s1.enabled && s1.polarity != state->polarity) {
+		s2.polarity = state->polarity;
+		s2.duty_cycle = s1.period - s1.duty_cycle;
+		s2.period = s1.period;
+		s2.enabled = s1.enabled;
+	} else {
+		s2 = s1;
+	}
+
+	if (s2.polarity != state->polarity &&
+	    state->duty_cycle < state->period)
+		dev_warn(chip->dev, ".apply ignored .polarity\n");
+
+	if (state->enabled &&
+	    last->polarity == state->polarity &&
+	    last->period > s2.period &&
+	    last->period <= state->period)
+		dev_warn(chip->dev,
+			 ".apply didn't pick the best available period (requested: %llu, applied: %llu, possible: %llu)\n",
+			 state->period, s2.period, last->period);
+
+	if (state->enabled && state->period < s2.period)
+		dev_warn(chip->dev,
+			 ".apply is supposed to round down period (requested: %llu, applied: %llu)\n",
+			 state->period, s2.period);
+
+	if (state->enabled &&
+	    last->polarity == state->polarity &&
+	    last->period == s2.period &&
+	    last->duty_cycle > s2.duty_cycle &&
+	    last->duty_cycle <= state->duty_cycle)
+		dev_warn(chip->dev,
+			 ".apply didn't pick the best available duty cycle (requested: %llu/%llu, applied: %llu/%llu, possible: %llu/%llu)\n",
+			 state->duty_cycle, state->period,
+			 s2.duty_cycle, s2.period,
+			 last->duty_cycle, last->period);
+
+	if (state->enabled && state->duty_cycle < s2.duty_cycle)
+		dev_warn(chip->dev,
+			 ".apply is supposed to round down duty_cycle (requested: %llu/%llu, applied: %llu/%llu)\n",
+			 state->duty_cycle, state->period,
+			 s2.duty_cycle, s2.period);
+
+	if (!state->enabled && s2.enabled && s2.duty_cycle > 0)
+		dev_warn(chip->dev,
+			 "requested disabled, but yielded enabled with duty > 0\n");
+
+	/* reapply the state that the driver reported being configured. */
+	err = chip->ops->apply(chip, pwm, &s1);
+	if (err) {
+		*last = s1;
+		dev_err(chip->dev, "failed to reapply current setting\n");
+		return;
+	}
+
+	trace_pwm_apply(pwm, &s1);
+
+	chip->ops->get_state(chip, pwm, last);
+	trace_pwm_get(pwm, last);
+
+	/* reapplication of the current state should give an exact match */
+	if (s1.enabled != last->enabled ||
+	    s1.polarity != last->polarity ||
+	    (s1.enabled && s1.period != last->period) ||
+	    (s1.enabled && s1.duty_cycle != last->duty_cycle)) {
+		dev_err(chip->dev,
+			".apply is not idempotent (ena=%d pol=%d %llu/%llu) -> (ena=%d pol=%d %llu/%llu)\n",
+			s1.enabled, s1.polarity, s1.duty_cycle, s1.period,
+			last->enabled, last->polarity, last->duty_cycle,
+			last->period);
+	}
+}
+
 /**
  * pwm_apply_state() - atomically apply a new state to a PWM device
  * @pwm: PWM device
@@ -472,14 +562,22 @@ int pwm_apply_state(struct pwm_device *pwm, const struct pwm_state *state)
 		if (err)
 			return err;
 
+		trace_pwm_apply(pwm, state);
+
 		pwm->state = *state;
+
+		/*
+		 * only do this after pwm->state was applied as some
+		 * implementations of .get_state depend on this
+		 */
+		pwm_apply_state_debug(pwm, state);
 	} else {
 		/*
 		 * FIXME: restore the initial state in case of error.
 		 */
 		if (state->polarity != pwm->state.polarity) {
 			if (!chip->ops->set_polarity)
-				return -ENOTSUPP;
+				return -EINVAL;
 
 			/*
 			 * Changing the polarity of a running PWM is
@@ -1156,8 +1254,8 @@ static void pwm_dbg_show(struct pwm_chip *chip, struct seq_file *s)
 		if (state.enabled)
 			seq_puts(s, " enabled");
 
-		seq_printf(s, " period: %u ns", state.period);
-		seq_printf(s, " duty: %u ns", state.duty_cycle);
+		seq_printf(s, " period: %llu ns", state.period);
+		seq_printf(s, " duty: %llu ns", state.duty_cycle);
 		seq_printf(s, " polarity: %s",
 			   state.polarity ? "inverse" : "normal");
 
@@ -1199,30 +1297,19 @@ static int pwm_seq_show(struct seq_file *s, void *v)
 	return 0;
 }
 
-static const struct seq_operations pwm_seq_ops = {
+static const struct seq_operations pwm_debugfs_sops = {
 	.start = pwm_seq_start,
 	.next = pwm_seq_next,
 	.stop = pwm_seq_stop,
 	.show = pwm_seq_show,
 };
 
-static int pwm_seq_open(struct inode *inode, struct file *file)
-{
-	return seq_open(file, &pwm_seq_ops);
-}
-
-static const struct file_operations pwm_debugfs_ops = {
-	.owner = THIS_MODULE,
-	.open = pwm_seq_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = seq_release,
-};
+DEFINE_SEQ_ATTRIBUTE(pwm_debugfs);
 
 static int __init pwm_debugfs_init(void)
 {
-	debugfs_create_file("pwm", S_IFREG | S_IRUGO, NULL, NULL,
-			    &pwm_debugfs_ops);
+	debugfs_create_file("pwm", S_IFREG | 0444, NULL, NULL,
+			    &pwm_debugfs_fops);
 
 	return 0;
 }

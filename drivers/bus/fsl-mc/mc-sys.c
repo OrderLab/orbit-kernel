@@ -35,7 +35,7 @@ static enum mc_cmd_status mc_cmd_hdr_read_status(struct fsl_mc_command *cmd)
 	return (enum mc_cmd_status)hdr->status;
 }
 
-static u16 mc_cmd_hdr_read_cmdid(struct fsl_mc_command *cmd)
+u16 mc_cmd_hdr_read_cmdid(struct fsl_mc_command *cmd)
 {
 	struct mc_cmd_header *hdr = (struct mc_cmd_header *)&cmd->header;
 	u16 cmd_id = le16_to_cpu(hdr->cmd_id);
@@ -251,7 +251,7 @@ int mc_send_command(struct fsl_mc_io *mc_io, struct fsl_mc_command *cmd)
 		return -EINVAL;
 
 	if (mc_io->flags & FSL_MC_IO_ATOMIC_CONTEXT_PORTAL)
-		spin_lock_irqsave(&mc_io->spinlock, irq_flags);
+		raw_spin_lock_irqsave(&mc_io->spinlock, irq_flags);
 	else
 		mutex_lock(&mc_io->mutex);
 
@@ -287,7 +287,7 @@ int mc_send_command(struct fsl_mc_io *mc_io, struct fsl_mc_command *cmd)
 	error = 0;
 common_exit:
 	if (mc_io->flags & FSL_MC_IO_ATOMIC_CONTEXT_PORTAL)
-		spin_unlock_irqrestore(&mc_io->spinlock, irq_flags);
+		raw_spin_unlock_irqrestore(&mc_io->spinlock, irq_flags);
 	else
 		mutex_unlock(&mc_io->mutex);
 

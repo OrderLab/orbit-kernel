@@ -7,7 +7,7 @@
 
 #include "./bebob.h"
 
-#define CALLBACK_TIMEOUT	2000
+#define CALLBACK_TIMEOUT	2500
 #define FW_ISO_RESOURCE_DELAY	1000
 
 /*
@@ -398,23 +398,6 @@ check_connection_used_by_others(struct snd_bebob *bebob, struct amdtp_stream *s)
 	return err;
 }
 
-static int make_both_connections(struct snd_bebob *bebob)
-{
-	int err = 0;
-
-	err = cmp_connection_establish(&bebob->out_conn);
-	if (err < 0)
-		return err;
-
-	err = cmp_connection_establish(&bebob->in_conn);
-	if (err < 0) {
-		cmp_connection_break(&bebob->out_conn);
-		return err;
-	}
-
-	return 0;
-}
-
 static void break_both_connections(struct snd_bebob *bebob)
 {
 	cmp_connection_break(&bebob->in_conn);
@@ -427,8 +410,7 @@ static void break_both_connections(struct snd_bebob *bebob)
 		msleep(600);
 }
 
-static int
-start_stream(struct snd_bebob *bebob, struct amdtp_stream *stream)
+static int start_stream(struct snd_bebob *bebob, struct amdtp_stream *stream)
 {
 	struct cmp_connection *conn;
 	int err = 0;
@@ -438,18 +420,19 @@ start_stream(struct snd_bebob *bebob, struct amdtp_stream *stream)
 	else
 		conn = &bebob->out_conn;
 
-	/* channel mapping */
+	// channel mapping.
 	if (bebob->maudio_special_quirk == NULL) {
 		err = map_data_channels(bebob, stream);
 		if (err < 0)
-			goto end;
+			return err;
 	}
 
-	// start amdtp stream.
-	err = amdtp_domain_add_stream(&bebob->domain, stream,
-				      conn->resources.channel, conn->speed);
-end:
-	return err;
+	err = cmp_connection_establish(conn);
+	if (err < 0)
+		return err;
+
+	return amdtp_domain_add_stream(&bebob->domain, stream,
+				       conn->resources.channel, conn->speed);
 }
 
 static int init_stream(struct snd_bebob *bebob, struct amdtp_stream *stream)
@@ -534,27 +517,31 @@ int snd_bebob_stream_init_duplex(struct snd_bebob *bebob)
 static int keep_resources(struct snd_bebob *bebob, struct amdtp_stream *stream,
 			  unsigned int rate, unsigned int index)
 {
-	struct snd_bebob_stream_formation *formation;
+	unsigned int pcm_channels;
+	unsigned int midi_ports;
 	struct cmp_connection *conn;
 	int err;
 
 	if (stream == &bebob->tx_stream) {
-		formation = bebob->tx_stream_formations + index;
+		pcm_channels = bebob->tx_stream_formations[index].pcm;
+		midi_ports = bebob->midi_input_ports;
 		conn = &bebob->out_conn;
 	} else {
-		formation = bebob->rx_stream_formations + index;
+		pcm_channels = bebob->rx_stream_formations[index].pcm;
+		midi_ports = bebob->midi_output_ports;
 		conn = &bebob->in_conn;
 	}
 
-	err = amdtp_am824_set_parameters(stream, rate, formation->pcm,
-					 formation->midi, false);
+	err = amdtp_am824_set_parameters(stream, rate, pcm_channels, midi_ports, false);
 	if (err < 0)
 		return err;
 
 	return cmp_connection_reserve(conn, amdtp_stream_get_max_payload(stream));
 }
 
-int snd_bebob_stream_reserve_duplex(struct snd_bebob *bebob, unsigned int rate)
+int snd_bebob_stream_reserve_duplex(struct snd_bebob *bebob, unsigned int rate,
+				    unsigned int frames_per_period,
+				    unsigned int frames_per_buffer)
 {
 	unsigned int curr_rate;
 	int err;
@@ -607,6 +594,14 @@ int snd_bebob_stream_reserve_duplex(struct snd_bebob *bebob, unsigned int rate)
 			cmp_connection_release(&bebob->out_conn);
 			return err;
 		}
+
+		err = amdtp_domain_set_events_per_period(&bebob->domain,
+					frames_per_period, frames_per_buffer);
+		if (err < 0) {
+			cmp_connection_release(&bebob->out_conn);
+			cmp_connection_release(&bebob->in_conn);
+			return err;
+		}
 	}
 
 	return 0;
@@ -628,7 +623,10 @@ int snd_bebob_stream_start_duplex(struct snd_bebob *bebob)
 	}
 
 	if (!amdtp_stream_running(&bebob->rx_stream)) {
+		enum snd_bebob_clock_type src;
+		struct amdtp_stream *master, *slave;
 		unsigned int curr_rate;
+		unsigned int ir_delay_cycle;
 
 		if (bebob->maudio_special_quirk) {
 			err = bebob->spec->rate->get(bebob, &curr_rate);
@@ -636,19 +634,40 @@ int snd_bebob_stream_start_duplex(struct snd_bebob *bebob)
 				return err;
 		}
 
-		err = make_both_connections(bebob);
+		err = snd_bebob_stream_get_clock_src(bebob, &src);
 		if (err < 0)
 			return err;
 
-		err = start_stream(bebob, &bebob->rx_stream);
+		if (src != SND_BEBOB_CLOCK_TYPE_SYT) {
+			master = &bebob->tx_stream;
+			slave = &bebob->rx_stream;
+		} else {
+			master = &bebob->rx_stream;
+			slave = &bebob->tx_stream;
+		}
+
+		err = start_stream(bebob, master);
 		if (err < 0)
 			goto error;
 
-		err = start_stream(bebob, &bebob->tx_stream);
+		err = start_stream(bebob, slave);
 		if (err < 0)
 			goto error;
 
-		err = amdtp_domain_start(&bebob->domain);
+		// The device postpones start of transmission mostly for 1 sec
+		// after receives packets firstly. For safe, IR context starts
+		// 0.4 sec (=3200 cycles) later to version 1 or 2 firmware,
+		// 2.0 sec (=16000 cycles) for version 3 firmware. This is
+		// within 2.5 sec (=CALLBACK_TIMEOUT).
+		// Furthermore, some devices transfer isoc packets with
+		// discontinuous counter in the beginning of packet streaming.
+		// The delay has an effect to avoid detection of this
+		// discontinuity.
+		if (bebob->version < 2)
+			ir_delay_cycle = 3200;
+		else
+			ir_delay_cycle = 16000;
+		err = amdtp_domain_start(&bebob->domain, ir_delay_cycle);
 		if (err < 0)
 			goto error;
 
@@ -779,42 +798,42 @@ parse_stream_formation(u8 *buf, unsigned int len,
 	return 0;
 }
 
-static int
-fill_stream_formations(struct snd_bebob *bebob, enum avc_bridgeco_plug_dir dir,
-		       unsigned short pid)
+static int fill_stream_formations(struct snd_bebob *bebob, u8 addr[AVC_BRIDGECO_ADDR_BYTES],
+				  enum avc_bridgeco_plug_dir plug_dir, unsigned int plug_id,
+				  struct snd_bebob_stream_formation *formations)
 {
+	enum avc_bridgeco_plug_type plug_type;
 	u8 *buf;
-	struct snd_bebob_stream_formation *formations;
 	unsigned int len, eid;
-	u8 addr[AVC_BRIDGECO_ADDR_BYTES];
 	int err;
+
+	avc_bridgeco_fill_unit_addr(addr, plug_dir, AVC_BRIDGECO_PLUG_UNIT_ISOC, plug_id);
+
+	err = avc_bridgeco_get_plug_type(bebob->unit, addr, &plug_type);
+	if (err < 0) {
+		dev_err(&bebob->unit->device,
+			"Fail to get type for isoc %d plug 0: %d\n", plug_dir, err);
+		return err;
+	} else if (plug_type != AVC_BRIDGECO_PLUG_TYPE_ISOC)
+		return -ENXIO;
 
 	buf = kmalloc(FORMAT_MAXIMUM_LENGTH, GFP_KERNEL);
 	if (buf == NULL)
 		return -ENOMEM;
 
-	if (dir == AVC_BRIDGECO_PLUG_DIR_IN)
-		formations = bebob->rx_stream_formations;
-	else
-		formations = bebob->tx_stream_formations;
+	for (eid = 0; eid < SND_BEBOB_STRM_FMT_ENTRIES; ++eid) {
+		avc_bridgeco_fill_unit_addr(addr, plug_dir, AVC_BRIDGECO_PLUG_UNIT_ISOC, plug_id);
 
-	for (eid = 0; eid < SND_BEBOB_STRM_FMT_ENTRIES; eid++) {
 		len = FORMAT_MAXIMUM_LENGTH;
-		avc_bridgeco_fill_unit_addr(addr, dir,
-					    AVC_BRIDGECO_PLUG_UNIT_ISOC, pid);
-		err = avc_bridgeco_get_plug_strm_fmt(bebob->unit, addr, buf,
-						     &len, eid);
-		/* No entries remained. */
+		err = avc_bridgeco_get_plug_strm_fmt(bebob->unit, addr, buf, &len, eid);
+		// No entries remained.
 		if (err == -EINVAL && eid > 0) {
 			err = 0;
 			break;
 		} else if (err < 0) {
 			dev_err(&bebob->unit->device,
-			"fail to get stream format %d for isoc %s plug %d:%d\n",
-				eid,
-				(dir == AVC_BRIDGECO_PLUG_DIR_IN) ? "in" :
-								    "out",
-				pid, err);
+				"fail to get stream format %d for isoc %d plug %d:%d\n",
+				eid, plug_dir, plug_id, err);
 			break;
 		}
 
@@ -824,6 +843,49 @@ fill_stream_formations(struct snd_bebob *bebob, enum avc_bridgeco_plug_dir dir,
 	}
 
 	kfree(buf);
+	return err;
+}
+
+static int detect_midi_ports(struct snd_bebob *bebob,
+			     const struct snd_bebob_stream_formation *formats,
+			     u8 addr[AVC_BRIDGECO_ADDR_BYTES], enum avc_bridgeco_plug_dir plug_dir,
+			     unsigned int plug_count, unsigned int *midi_ports)
+{
+	int i;
+	int err = 0;
+
+	*midi_ports = 0;
+
+	/// Detect the number of available MIDI ports when packet has MIDI conformant data channel.
+	for (i = 0; i < SND_BEBOB_STRM_FMT_ENTRIES; ++i) {
+		if (formats[i].midi > 0)
+			break;
+	}
+	if (i >= SND_BEBOB_STRM_FMT_ENTRIES)
+		return 0;
+
+	for (i = 0; i < plug_count; ++i) {
+		enum avc_bridgeco_plug_type plug_type;
+		unsigned int ch_count;
+
+		avc_bridgeco_fill_unit_addr(addr, plug_dir, AVC_BRIDGECO_PLUG_UNIT_EXT, i);
+
+		err = avc_bridgeco_get_plug_type(bebob->unit, addr, &plug_type);
+		if (err < 0) {
+			dev_err(&bebob->unit->device,
+				"fail to get type for external %d plug %d: %d\n",
+				plug_dir, i, err);
+			break;
+		} else if (plug_type != AVC_BRIDGECO_PLUG_TYPE_MIDI) {
+			continue;
+		}
+
+		err = avc_bridgeco_get_plug_ch_count(bebob->unit, addr, &ch_count);
+		if (err < 0)
+			break;
+		*midi_ports += ch_count;
+	}
+
 	return err;
 }
 
@@ -869,8 +931,6 @@ int snd_bebob_stream_discover(struct snd_bebob *bebob)
 {
 	const struct snd_bebob_clock_spec *clk_spec = bebob->spec->clock;
 	u8 plugs[AVC_PLUG_INFO_BUF_BYTES], addr[AVC_BRIDGECO_ADDR_BYTES];
-	enum avc_bridgeco_plug_type type;
-	unsigned int i;
 	int err;
 
 	/* the number of plugs for isoc in/out, ext in/out  */
@@ -891,67 +951,25 @@ int snd_bebob_stream_discover(struct snd_bebob *bebob)
 		goto end;
 	}
 
-	avc_bridgeco_fill_unit_addr(addr, AVC_BRIDGECO_PLUG_DIR_IN,
-				    AVC_BRIDGECO_PLUG_UNIT_ISOC, 0);
-	err = avc_bridgeco_get_plug_type(bebob->unit, addr, &type);
-	if (err < 0) {
-		dev_err(&bebob->unit->device,
-			"fail to get type for isoc in plug 0: %d\n", err);
-		goto end;
-	} else if (type != AVC_BRIDGECO_PLUG_TYPE_ISOC) {
-		err = -ENOSYS;
-		goto end;
-	}
-	err = fill_stream_formations(bebob, AVC_BRIDGECO_PLUG_DIR_IN, 0);
+	err = fill_stream_formations(bebob, addr, AVC_BRIDGECO_PLUG_DIR_IN, 0,
+				     bebob->rx_stream_formations);
 	if (err < 0)
 		goto end;
 
-	avc_bridgeco_fill_unit_addr(addr, AVC_BRIDGECO_PLUG_DIR_OUT,
-				    AVC_BRIDGECO_PLUG_UNIT_ISOC, 0);
-	err = avc_bridgeco_get_plug_type(bebob->unit, addr, &type);
-	if (err < 0) {
-		dev_err(&bebob->unit->device,
-			"fail to get type for isoc out plug 0: %d\n", err);
-		goto end;
-	} else if (type != AVC_BRIDGECO_PLUG_TYPE_ISOC) {
-		err = -ENOSYS;
-		goto end;
-	}
-	err = fill_stream_formations(bebob, AVC_BRIDGECO_PLUG_DIR_OUT, 0);
+	err = fill_stream_formations(bebob, addr, AVC_BRIDGECO_PLUG_DIR_OUT, 0,
+				     bebob->tx_stream_formations);
 	if (err < 0)
 		goto end;
 
-	/* count external input plugs for MIDI */
-	bebob->midi_input_ports = 0;
-	for (i = 0; i < plugs[2]; i++) {
-		avc_bridgeco_fill_unit_addr(addr, AVC_BRIDGECO_PLUG_DIR_IN,
-					    AVC_BRIDGECO_PLUG_UNIT_EXT, i);
-		err = avc_bridgeco_get_plug_type(bebob->unit, addr, &type);
-		if (err < 0) {
-			dev_err(&bebob->unit->device,
-			"fail to get type for external in plug %d: %d\n",
-				i, err);
-			goto end;
-		} else if (type == AVC_BRIDGECO_PLUG_TYPE_MIDI) {
-			bebob->midi_input_ports++;
-		}
-	}
+	err = detect_midi_ports(bebob, bebob->rx_stream_formations, addr, AVC_BRIDGECO_PLUG_DIR_IN,
+				plugs[2], &bebob->midi_input_ports);
+	if (err < 0)
+		goto end;
 
-	/* count external output plugs for MIDI */
-	bebob->midi_output_ports = 0;
-	for (i = 0; i < plugs[3]; i++) {
-		avc_bridgeco_fill_unit_addr(addr, AVC_BRIDGECO_PLUG_DIR_OUT,
-					    AVC_BRIDGECO_PLUG_UNIT_EXT, i);
-		err = avc_bridgeco_get_plug_type(bebob->unit, addr, &type);
-		if (err < 0) {
-			dev_err(&bebob->unit->device,
-			"fail to get type for external out plug %d: %d\n",
-				i, err);
-			goto end;
-		} else if (type == AVC_BRIDGECO_PLUG_TYPE_MIDI) {
-			bebob->midi_output_ports++;
-		}
-	}
+	err = detect_midi_ports(bebob, bebob->tx_stream_formations, addr, AVC_BRIDGECO_PLUG_DIR_OUT,
+				plugs[3], &bebob->midi_output_ports);
+	if (err < 0)
+		goto end;
 
 	/* for check source of clock later */
 	if (!clk_spec)

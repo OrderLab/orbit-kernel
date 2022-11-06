@@ -42,7 +42,7 @@
 #include <rdma/ib_cache.h>
 #include "sa.h"
 
-static void mcast_add_one(struct ib_device *device);
+static int mcast_add_one(struct ib_device *device);
 static void mcast_remove_one(struct ib_device *device, void *client_data);
 
 static struct ib_client mcast_client = {
@@ -63,7 +63,7 @@ struct mcast_port {
 	struct rb_root		table;
 	atomic_t		refcount;
 	struct completion	comp;
-	u8			port_num;
+	u32			port_num;
 };
 
 struct mcast_device {
@@ -71,7 +71,7 @@ struct mcast_device {
 	struct ib_event_handler	event_handler;
 	int			start_port;
 	int			end_port;
-	struct mcast_port	port[0];
+	struct mcast_port	port[];
 };
 
 enum mcast_state {
@@ -605,7 +605,7 @@ found:
  */
 struct ib_sa_multicast *
 ib_sa_join_multicast(struct ib_sa_client *client,
-		     struct ib_device *device, u8 port_num,
+		     struct ib_device *device, u32 port_num,
 		     struct ib_sa_mcmember_rec *rec,
 		     ib_sa_comp_mask comp_mask, gfp_t gfp_mask,
 		     int (*callback)(int status,
@@ -690,7 +690,7 @@ void ib_sa_free_multicast(struct ib_sa_multicast *multicast)
 }
 EXPORT_SYMBOL(ib_sa_free_multicast);
 
-int ib_sa_get_mcmember_rec(struct ib_device *device, u8 port_num,
+int ib_sa_get_mcmember_rec(struct ib_device *device, u32 port_num,
 			   union ib_gid *mgid, struct ib_sa_mcmember_rec *rec)
 {
 	struct mcast_device *dev;
@@ -721,6 +721,7 @@ EXPORT_SYMBOL(ib_sa_get_mcmember_rec);
  * member record and gid of the device.
  * @device:	RDMA device
  * @port_num:	Port of the rdma device to consider
+ * @rec:	Multicast member record to use
  * @ndev:	Optional netdevice, applicable only for RoCE
  * @gid_type:	GID type to consider
  * @ah_attr:	AH attribute to fillup on successful completion
@@ -731,7 +732,7 @@ EXPORT_SYMBOL(ib_sa_get_mcmember_rec);
  * success or appropriate error code.
  *
  */
-int ib_init_ah_from_mcmember(struct ib_device *device, u8 port_num,
+int ib_init_ah_from_mcmember(struct ib_device *device, u32 port_num,
 			     struct ib_sa_mcmember_rec *rec,
 			     struct net_device *ndev,
 			     enum ib_gid_type gid_type,
@@ -815,7 +816,7 @@ static void mcast_event_handler(struct ib_event_handler *handler,
 	}
 }
 
-static void mcast_add_one(struct ib_device *device)
+static int mcast_add_one(struct ib_device *device)
 {
 	struct mcast_device *dev;
 	struct mcast_port *port;
@@ -825,7 +826,7 @@ static void mcast_add_one(struct ib_device *device)
 	dev = kmalloc(struct_size(dev, port, device->phys_port_cnt),
 		      GFP_KERNEL);
 	if (!dev)
-		return;
+		return -ENOMEM;
 
 	dev->start_port = rdma_start_port(device);
 	dev->end_port = rdma_end_port(device);
@@ -845,7 +846,7 @@ static void mcast_add_one(struct ib_device *device)
 
 	if (!count) {
 		kfree(dev);
-		return;
+		return -EOPNOTSUPP;
 	}
 
 	dev->device = device;
@@ -853,6 +854,7 @@ static void mcast_add_one(struct ib_device *device)
 
 	INIT_IB_EVENT_HANDLER(&dev->event_handler, device, mcast_event_handler);
 	ib_register_event_handler(&dev->event_handler);
+	return 0;
 }
 
 static void mcast_remove_one(struct ib_device *device, void *client_data)
@@ -860,9 +862,6 @@ static void mcast_remove_one(struct ib_device *device, void *client_data)
 	struct mcast_device *dev = client_data;
 	struct mcast_port *port;
 	int i;
-
-	if (!dev)
-		return;
 
 	ib_unregister_event_handler(&dev->event_handler);
 	flush_workqueue(mcast_wq);

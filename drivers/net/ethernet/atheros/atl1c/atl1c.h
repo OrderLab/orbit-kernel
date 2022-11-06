@@ -367,6 +367,7 @@ struct atl1c_hw {
 	u16 phy_id1;
 	u16 phy_id2;
 
+	spinlock_t intr_mask_lock;	/* protect the intr_mask */
 	u32 intr_mask;
 
 	u8 preamble_len;
@@ -506,6 +507,7 @@ struct atl1c_adapter {
 	struct net_device   *netdev;
 	struct pci_dev      *pdev;
 	struct napi_struct  napi;
+	struct napi_struct  tx_napi;
 	struct page         *rx_page;
 	unsigned int	    rx_page_offset;
 	unsigned int	    rx_frag_size;
@@ -583,7 +585,6 @@ struct atl1c_adapter {
 		readl(((a)->hw_addr + reg) + ((offset) << 2)))
 
 extern char atl1c_driver_name[];
-extern char atl1c_driver_version[];
 
 void atl1c_reinit_locked(struct atl1c_adapter *adapter);
 s32 atl1c_reset_hw(struct atl1c_hw *hw);

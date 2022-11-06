@@ -8,7 +8,7 @@
  *
  * This file is part of the SCTP kernel implementation
  *
- * This module provides the abstraction for an SCTP tranport representing
+ * This module provides the abstraction for an SCTP transport representing
  * a remote transport address.  For local transport addresses, we just use
  * union sctp_addr.
  *
@@ -123,7 +123,7 @@ void sctp_transport_free(struct sctp_transport *transport)
 	/* Delete the T3_rtx timer if it's active.
 	 * There is no point in not doing this now and letting
 	 * structure hang around in memory since we know
-	 * the tranport is going away.
+	 * the transport is going away.
 	 */
 	if (del_timer(&transport->T3_rtx_timer))
 		sctp_transport_put(transport);
@@ -334,7 +334,7 @@ void sctp_transport_update_rto(struct sctp_transport *tp, __u32 rtt)
 		pr_debug("%s: rto_pending not set on transport %p!\n", __func__, tp);
 
 	if (tp->rttvar || tp->srtt) {
-		struct net *net = sock_net(tp->asoc->base.sk);
+		struct net *net = tp->asoc->base.net;
 		/* 6.3.1 C3) When a new RTT measurement R' is made, set
 		 * RTTVAR <- (1 - RTO.Beta) * RTTVAR + RTO.Beta * |SRTT - R'|
 		 * SRTT <- (1 - RTO.Alpha) * SRTT + RTO.Alpha * R'

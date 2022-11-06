@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * trace_hwlatdetect.c - A simple Hardware Latency detector.
+ * trace_hwlat.c - A simple Hardware Latency detector.
  *
  * Use this tracer to detect large system latencies induced by the behavior of
  * certain underlying system hardware or firmware, independent of Linux itself.
@@ -83,6 +83,7 @@ struct hwlat_sample {
 	u64			nmi_total_ts;	/* Total time spent in NMIs */
 	struct timespec64	timestamp;	/* wall time */
 	int			nmi_count;	/* # NMIs during this sample */
+	int			count;		/* # of iterations over thresh */
 };
 
 /* keep the global state somewhere. */
@@ -104,17 +105,12 @@ static void trace_hwlat_sample(struct hwlat_sample *sample)
 {
 	struct trace_array *tr = hwlat_trace;
 	struct trace_event_call *call = &event_hwlat;
-	struct ring_buffer *buffer = tr->trace_buffer.buffer;
+	struct trace_buffer *buffer = tr->array_buffer.buffer;
 	struct ring_buffer_event *event;
 	struct hwlat_entry *entry;
-	unsigned long flags;
-	int pc;
-
-	pc = preempt_count();
-	local_save_flags(flags);
 
 	event = trace_buffer_lock_reserve(buffer, TRACE_HWLAT, sizeof(*entry),
-					  flags, pc);
+					  tracing_gen_ctx());
 	if (!event)
 		return;
 	entry	= ring_buffer_event_data(event);
@@ -124,6 +120,7 @@ static void trace_hwlat_sample(struct hwlat_sample *sample)
 	entry->timestamp		= sample->timestamp;
 	entry->nmi_total_ts		= sample->nmi_total_ts;
 	entry->nmi_count		= sample->nmi_count;
+	entry->count			= sample->count;
 
 	if (!call_filter_check_discard(call, entry, buffer, event))
 		trace_buffer_unlock_commit_nostack(buffer, event);
@@ -167,12 +164,14 @@ void trace_hwlat_callback(bool enter)
 static int get_sample(void)
 {
 	struct trace_array *tr = hwlat_trace;
+	struct hwlat_sample s;
 	time_type start, t1, t2, last_t2;
-	s64 diff, total, last_total = 0;
+	s64 diff, outer_diff, total, last_total = 0;
 	u64 sample = 0;
 	u64 thresh = tracing_thresh;
 	u64 outer_sample = 0;
 	int ret = -1;
+	unsigned int count = 0;
 
 	do_div(thresh, NSEC_PER_USEC); /* modifies interval value */
 
@@ -186,6 +185,7 @@ static int get_sample(void)
 
 	init_time(last_t2, 0);
 	start = time_get(); /* start timestamp */
+	outer_diff = 0;
 
 	do {
 
@@ -194,14 +194,14 @@ static int get_sample(void)
 
 		if (time_u64(last_t2)) {
 			/* Check the delta from outer loop (t2 to next t1) */
-			diff = time_to_us(time_sub(t1, last_t2));
+			outer_diff = time_to_us(time_sub(t1, last_t2));
 			/* This shouldn't happen */
-			if (diff < 0) {
+			if (outer_diff < 0) {
 				pr_err(BANNER "time running backwards\n");
 				goto out;
 			}
-			if (diff > outer_sample)
-				outer_sample = diff;
+			if (outer_diff > outer_sample)
+				outer_sample = outer_diff;
 		}
 		last_t2 = t2;
 
@@ -216,6 +216,12 @@ static int get_sample(void)
 
 		/* This checks the inner loop (t1 to t2) */
 		diff = time_to_us(time_sub(t2, t1));     /* current diff */
+
+		if (diff > thresh || outer_diff > thresh) {
+			if (!count)
+				ktime_get_real_ts64(&s.timestamp);
+			count++;
+		}
 
 		/* This shouldn't happen */
 		if (diff < 0) {
@@ -236,7 +242,7 @@ static int get_sample(void)
 
 	/* If we exceed the threshold value, we have found a hardware latency */
 	if (sample > thresh || outer_sample > thresh) {
-		struct hwlat_sample s;
+		u64 latency;
 
 		ret = 1;
 
@@ -248,16 +254,18 @@ static int get_sample(void)
 		s.seqnum = hwlat_data.count;
 		s.duration = sample;
 		s.outer_duration = outer_sample;
-		ktime_get_real_ts64(&s.timestamp);
 		s.nmi_total_ts = nmi_total_ts;
 		s.nmi_count = nmi_count;
+		s.count = count;
 		trace_hwlat_sample(&s);
 
+		latency = max(sample, outer_sample);
+
 		/* Keep a running maximum ever recorded hardware latency */
-		if (sample > tr->max_latency)
-			tr->max_latency = sample;
-		if (outer_sample > tr->max_latency)
-			tr->max_latency = outer_sample;
+		if (latency > tr->max_latency) {
+			tr->max_latency = latency;
+			latency_fsnotify(tr);
+		}
 	}
 
 out:
@@ -277,7 +285,7 @@ static void move_to_next_cpu(void)
 		return;
 	/*
 	 * If for some reason the user modifies the CPU affinity
-	 * of this thread, than stop migrating for the duration
+	 * of this thread, then stop migrating for the duration
 	 * of the current test.
 	 */
 	if (!cpumask_equal(current_mask, current->cpus_ptr))
@@ -359,7 +367,6 @@ static int start_kthread(struct trace_array *tr)
 		return 0;
 
 	/* Just pick the first CPU on first iteration */
-	current_mask = &save_cpumask;
 	get_online_cpus();
 	cpumask_and(current_mask, cpu_online_mask, tr->tracing_cpumask);
 	put_online_cpus();
@@ -382,7 +389,7 @@ static int start_kthread(struct trace_array *tr)
 }
 
 /**
- * stop_kthread - Inform the hardware latency samping/detector kthread to stop
+ * stop_kthread - Inform the hardware latency sampling/detector kthread to stop
  *
  * This kicks the running hardware latency sampling/detector kernel thread and
  * tells it to stop sampling now. Use this on unload and at system shutdown.
@@ -473,11 +480,11 @@ hwlat_width_write(struct file *filp, const char __user *ubuf,
  * @ppos: The current position in @file
  *
  * This function provides a write implementation for the "window" interface
- * to the hardware latency detetector. The window is the total time
+ * to the hardware latency detector. The window is the total time
  * in us that will be considered one sample period. Conceptually, windows
  * occur back-to-back and contain a sample width period during which
  * actual sampling occurs. Can be used to write a new total window size. It
- * is enfoced that any value written must be greater than the sample width
+ * is enforced that any value written must be greater than the sample width
  * size, or an error results.
  */
 static ssize_t
@@ -526,14 +533,14 @@ static const struct file_operations window_fops = {
  */
 static int init_tracefs(void)
 {
-	struct dentry *d_tracer;
+	int ret;
 	struct dentry *top_dir;
 
-	d_tracer = tracing_init_dentry();
-	if (IS_ERR(d_tracer))
+	ret = tracing_init_dentry();
+	if (ret)
 		return -ENOMEM;
 
-	top_dir = tracefs_create_dir("hwlat_detector", d_tracer);
+	top_dir = tracefs_create_dir("hwlat_detector", NULL);
 	if (!top_dir)
 		return -ENOMEM;
 
@@ -554,7 +561,7 @@ static int init_tracefs(void)
 	return 0;
 
  err:
-	tracefs_remove_recursive(top_dir);
+	tracefs_remove(top_dir);
 	return -ENOMEM;
 }
 

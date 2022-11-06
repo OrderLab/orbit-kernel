@@ -30,6 +30,8 @@
 
 #include <linux/export.h>
 #include <linux/highmem.h>
+#include <linux/mem_encrypt.h>
+#include <xen/xen.h>
 
 #include <drm/drm_cache.h>
 
@@ -62,10 +64,10 @@ static void drm_cache_flush_clflush(struct page *pages[],
 {
 	unsigned long i;
 
-	mb();
+	mb(); /*Full memory barrier used before so that CLFLUSH is ordered*/
 	for (i = 0; i < num_pages; i++)
 		drm_clflush_page(*pages++);
-	mb();
+	mb(); /*Also used after CLFLUSH so that all cache is flushed*/
 }
 #endif
 
@@ -92,6 +94,7 @@ drm_clflush_pages(struct page *pages[], unsigned long num_pages)
 
 #elif defined(__powerpc__)
 	unsigned long i;
+
 	for (i = 0; i < num_pages; i++) {
 		struct page *page = pages[i];
 		void *page_virtual;
@@ -125,10 +128,10 @@ drm_clflush_sg(struct sg_table *st)
 	if (static_cpu_has(X86_FEATURE_CLFLUSH)) {
 		struct sg_page_iter sg_iter;
 
-		mb();
-		for_each_sg_page(st->sgl, &sg_iter, st->nents, 0)
+		mb(); /*CLFLUSH is ordered only by using memory barriers*/
+		for_each_sgtable_page(st, &sg_iter, 0)
 			drm_clflush_page(sg_page_iter_page(&sg_iter));
-		mb();
+		mb(); /*Make sure that all cache line entry is flushed*/
 
 		return;
 	}
@@ -157,12 +160,13 @@ drm_clflush_virt_range(void *addr, unsigned long length)
 	if (static_cpu_has(X86_FEATURE_CLFLUSH)) {
 		const int size = boot_cpu_data.x86_clflush_size;
 		void *end = addr + length;
+
 		addr = (void *)(((unsigned long)addr) & -size);
-		mb();
+		mb(); /*CLFLUSH is only ordered with a full memory barrier*/
 		for (; addr < end; addr += size)
 			clflushopt(addr);
 		clflushopt(end - 1); /* force serialisation */
-		mb();
+		mb(); /*Ensure that evry data cache line entry is flushed*/
 		return;
 	}
 
@@ -174,3 +178,34 @@ drm_clflush_virt_range(void *addr, unsigned long length)
 #endif
 }
 EXPORT_SYMBOL(drm_clflush_virt_range);
+
+bool drm_need_swiotlb(int dma_bits)
+{
+	struct resource *tmp;
+	resource_size_t max_iomem = 0;
+
+	/*
+	 * Xen paravirtual hosts require swiotlb regardless of requested dma
+	 * transfer size.
+	 *
+	 * NOTE: Really, what it requires is use of the dma_alloc_coherent
+	 *       allocator used in ttm_dma_populate() instead of
+	 *       ttm_populate_and_map_pages(), which bounce buffers so much in
+	 *       Xen it leads to swiotlb buffer exhaustion.
+	 */
+	if (xen_pv_domain())
+		return true;
+
+	/*
+	 * Enforce dma_alloc_coherent when memory encryption is active as well
+	 * for the same reasons as for Xen paravirtual hosts.
+	 */
+	if (mem_encrypt_active())
+		return true;
+
+	for (tmp = iomem_resource.child; tmp; tmp = tmp->sibling)
+		max_iomem = max(max_iomem,  tmp->end);
+
+	return max_iomem > ((u64)1 << dma_bits);
+}
+EXPORT_SYMBOL(drm_need_swiotlb);

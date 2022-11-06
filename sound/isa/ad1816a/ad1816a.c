@@ -22,13 +22,6 @@
 MODULE_AUTHOR("Massimo Piccioni <dafastidio@libero.it>");
 MODULE_DESCRIPTION("AD1816A, AD1815");
 MODULE_LICENSE("GPL");
-MODULE_SUPPORTED_DEVICE("{{Highscreen,Sound-Boostar 16 3D},"
-		"{Analog Devices,AD1815},"
-		"{Analog Devices,AD1816A},"
-		"{TerraTec,Base 64},"
-		"{TerraTec,AudioSystem EWS64S},"
-		"{Aztech/Newcom SC-16 3D},"
-		"{Shark Predator ISA}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 1-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
@@ -54,7 +47,7 @@ MODULE_PARM_DESC(clockfreq, "Clock frequency for ad1816a driver (default = 0).")
 static const struct pnp_card_device_id snd_ad1816a_pnpids[] = {
 	/* Analog Devices AD1815 */
 	{ .id = "ADS7150", .devs = { { .id = "ADS7150" }, { .id = "ADS7151" } } },
-	/* Analog Device AD1816? */
+	/* Analog Devices AD1816? */
 	{ .id = "ADS7180", .devs = { { .id = "ADS7180" }, { .id = "ADS7181" } } },
 	/* Analog Devices AD1816A - added by Kenneth Platz <kxp@atl.hp.com> */
 	{ .id = "ADS7181", .devs = { { .id = "ADS7180" }, { .id = "ADS7181" } } },

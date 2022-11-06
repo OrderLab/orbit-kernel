@@ -28,6 +28,15 @@
 #ifdef CONFIG_CIFS_FSCACHE
 
 /*
+ * Auxiliary data attached to CIFS superblock within the cache
+ */
+struct cifs_fscache_super_auxdata {
+	u64	resource_id;		/* unique server resource id */
+	__le64	vol_create_time;
+	u32	vol_serial_number;
+} __packed;
+
+/*
  * Auxiliary data attached to CIFS inode within the cache
  */
 struct cifs_fscache_inode_auxdata {
@@ -48,7 +57,6 @@ extern const struct fscache_cookie_def cifs_fscache_inode_object_def;
 
 extern int cifs_fscache_register(void);
 extern void cifs_fscache_unregister(void);
-extern char *extract_sharename(const char *);
 
 /*
  * fscache.c

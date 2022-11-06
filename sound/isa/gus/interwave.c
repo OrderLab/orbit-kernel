@@ -28,14 +28,8 @@ MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_LICENSE("GPL");
 #ifndef SNDRV_STB
 MODULE_DESCRIPTION("AMD InterWave");
-MODULE_SUPPORTED_DEVICE("{{Gravis,UltraSound Plug & Play},"
-		"{STB,SoundRage32},"
-		"{MED,MED3210},"
-		"{Dynasonix,Dynasonix Pro},"
-		"{Panasonic,PCA761AW}}");
 #else
 MODULE_DESCRIPTION("AMD InterWave STB with TEA6330T");
-MODULE_SUPPORTED_DEVICE("{{AMD,InterWave STB with TEA6330T}}");
 #endif
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
@@ -364,7 +358,7 @@ struct rom_hdr {
 
 static void snd_interwave_detect_memory(struct snd_gus_card *gus)
 {
-	static unsigned int lmc[13] =
+	static const unsigned int lmc[13] =
 	{
 		0x00000001, 0x00000101, 0x01010101, 0x00000401,
 		0x04040401, 0x00040101, 0x04040101, 0x00000004,
@@ -475,7 +469,7 @@ static void snd_interwave_init(int dev, struct snd_gus_card *gus)
 
 }
 
-static struct snd_kcontrol_new snd_interwave_controls[] = {
+static const struct snd_kcontrol_new snd_interwave_controls[] = {
 WSS_DOUBLE("Master Playback Switch", 0,
 		CS4231_LINE_LEFT_OUTPUT, CS4231_LINE_RIGHT_OUTPUT, 7, 7, 1, 1),
 WSS_DOUBLE("Master Playback Volume", 0,
@@ -667,6 +661,7 @@ static int snd_interwave_probe(struct snd_card *card, int dev)
 		return -EBUSY;
 	}
 	iwcard->irq = xirq;
+	card->sync_irq = iwcard->irq;
 
 	err = snd_wss_create(card,
 			     gus->gf1.port + 0x10c, -1, xirq,
@@ -787,8 +782,8 @@ static int snd_interwave_isa_probe(struct device *pdev,
 				   unsigned int dev)
 {
 	int err;
-	static int possible_irqs[] = {5, 11, 12, 9, 7, 15, 3, -1};
-	static int possible_dmas[] = {0, 1, 3, 5, 6, 7, -1};
+	static const int possible_irqs[] = {5, 11, 12, 9, 7, 15, 3, -1};
+	static const int possible_dmas[] = {0, 1, 3, 5, 6, 7, -1};
 
 	if (irq[dev] == SNDRV_AUTO_IRQ) {
 		if ((irq[dev] = snd_legacy_find_free_irq(possible_irqs)) < 0) {
@@ -812,7 +807,7 @@ static int snd_interwave_isa_probe(struct device *pdev,
 	if (port[dev] != SNDRV_AUTO_PORT)
 		return snd_interwave_isa_probe1(dev, pdev);
 	else {
-		static long possible_ports[] = {0x210, 0x220, 0x230, 0x240, 0x250, 0x260};
+		static const long possible_ports[] = {0x210, 0x220, 0x230, 0x240, 0x250, 0x260};
 		int i;
 		for (i = 0; i < ARRAY_SIZE(possible_ports); i++) {
 			port[dev] = possible_ports[i];
@@ -824,10 +819,9 @@ static int snd_interwave_isa_probe(struct device *pdev,
 	}
 }
 
-static int snd_interwave_isa_remove(struct device *devptr, unsigned int dev)
+static void snd_interwave_isa_remove(struct device *devptr, unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(devptr));
-	return 0;
 }
 
 static struct isa_driver snd_interwave_driver = {

@@ -205,8 +205,7 @@ static inline struct lowpan_peer *peer_lookup_dst(struct lowpan_btle_dev *dev,
 		}
 	}
 
-	/* use the neighbour cache for matching addresses assigned by SLAAC
-	*/
+	/* use the neighbour cache for matching addresses assigned by SLAAC */
 	neigh = __ipv6_neigh_lookup(dev->netdev, nexthop);
 	if (neigh) {
 		list_for_each_entry_rcu(peer, &dev->peers, list) {
@@ -572,7 +571,15 @@ static netdev_tx_t bt_xmit(struct sk_buff *skb, struct net_device *netdev)
 	return err < 0 ? NET_XMIT_DROP : err;
 }
 
+static int bt_dev_init(struct net_device *dev)
+{
+	netdev_lockdep_set_classes(dev);
+
+	return 0;
+}
+
 static const struct net_device_ops netdev_ops = {
+	.ndo_init		= bt_dev_init,
 	.ndo_start_xmit		= bt_xmit,
 };
 
@@ -833,8 +840,6 @@ static void chan_close_cb(struct l2cap_chan *chan)
 	} else {
 		spin_unlock(&devices_lock);
 	}
-
-	return;
 }
 
 static void chan_state_change_cb(struct l2cap_chan *chan, int state, int err)

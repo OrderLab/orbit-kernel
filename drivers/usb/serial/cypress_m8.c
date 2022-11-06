@@ -115,7 +115,7 @@ struct cypress_private {
 static int  cypress_earthmate_port_probe(struct usb_serial_port *port);
 static int  cypress_hidcom_port_probe(struct usb_serial_port *port);
 static int  cypress_ca42v2_port_probe(struct usb_serial_port *port);
-static int  cypress_port_remove(struct usb_serial_port *port);
+static void cypress_port_remove(struct usb_serial_port *port);
 static int  cypress_open(struct tty_struct *tty, struct usb_serial_port *port);
 static void cypress_close(struct usb_serial_port *port);
 static void cypress_dtr_rts(struct usb_serial_port *port, int on);
@@ -564,7 +564,7 @@ static int cypress_ca42v2_port_probe(struct usb_serial_port *port)
 	return 0;
 }
 
-static int cypress_port_remove(struct usb_serial_port *port)
+static void cypress_port_remove(struct usb_serial_port *port)
 {
 	struct cypress_private *priv;
 
@@ -572,8 +572,6 @@ static int cypress_port_remove(struct usb_serial_port *port)
 
 	kfifo_free(&priv->write_fifo);
 	kfree(priv);
-
-	return 0;
 }
 
 static int cypress_open(struct tty_struct *tty, struct usb_serial_port *port)
@@ -1048,7 +1046,7 @@ static void cypress_read_int_callback(struct urb *urb)
 		return;
 	case -EPIPE:
 		/* Can't call usb_clear_halt while in_interrupt */
-		/* FALLS THROUGH */
+		fallthrough;
 	default:
 		/* something ugly is going on... */
 		dev_err(dev, "%s - unexpected nonzero read status received: %d\n",
@@ -1197,7 +1195,7 @@ static void cypress_write_int_callback(struct urb *urb)
 		return;
 	case -EPIPE:
 		/* Cannot call usb_clear_halt while in_interrupt */
-		/* FALLTHROUGH */
+		fallthrough;
 	default:
 		dev_err(dev, "%s - unexpected nonzero write status received: %d\n",
 			__func__, status);

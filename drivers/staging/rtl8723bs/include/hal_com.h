@@ -111,70 +111,66 @@
 #define DESC_RATEVHTSS4MCS9		0x53
 
 #define HDATA_RATE(rate)\
-(rate ==DESC_RATE1M)?"CCK_1M":\
-(rate ==DESC_RATE2M)?"CCK_2M":\
-(rate ==DESC_RATE5_5M)?"CCK5_5M":\
-(rate ==DESC_RATE11M)?"CCK_11M":\
-(rate ==DESC_RATE6M)?"OFDM_6M":\
-(rate ==DESC_RATE9M)?"OFDM_9M":\
-(rate ==DESC_RATE12M)?"OFDM_12M":\
-(rate ==DESC_RATE18M)?"OFDM_18M":\
-(rate ==DESC_RATE24M)?"OFDM_24M":\
-(rate ==DESC_RATE36M)?"OFDM_36M":\
-(rate ==DESC_RATE48M)?"OFDM_48M":\
-(rate ==DESC_RATE54M)?"OFDM_54M":\
-(rate ==DESC_RATEMCS0)?"MCS0":\
-(rate ==DESC_RATEMCS1)?"MCS1":\
-(rate ==DESC_RATEMCS2)?"MCS2":\
-(rate ==DESC_RATEMCS3)?"MCS3":\
-(rate ==DESC_RATEMCS4)?"MCS4":\
-(rate ==DESC_RATEMCS5)?"MCS5":\
-(rate ==DESC_RATEMCS6)?"MCS6":\
-(rate ==DESC_RATEMCS7)?"MCS7":\
-(rate ==DESC_RATEMCS8)?"MCS8":\
-(rate ==DESC_RATEMCS9)?"MCS9":\
-(rate ==DESC_RATEMCS10)?"MCS10":\
-(rate ==DESC_RATEMCS11)?"MCS11":\
-(rate ==DESC_RATEMCS12)?"MCS12":\
-(rate ==DESC_RATEMCS13)?"MCS13":\
-(rate ==DESC_RATEMCS14)?"MCS14":\
-(rate ==DESC_RATEMCS15)?"MCS15":\
-(rate ==DESC_RATEVHTSS1MCS0)?"VHTSS1MCS0":\
-(rate ==DESC_RATEVHTSS1MCS1)?"VHTSS1MCS1":\
-(rate ==DESC_RATEVHTSS1MCS2)?"VHTSS1MCS2":\
-(rate ==DESC_RATEVHTSS1MCS3)?"VHTSS1MCS3":\
-(rate ==DESC_RATEVHTSS1MCS4)?"VHTSS1MCS4":\
-(rate ==DESC_RATEVHTSS1MCS5)?"VHTSS1MCS5":\
-(rate ==DESC_RATEVHTSS1MCS6)?"VHTSS1MCS6":\
-(rate ==DESC_RATEVHTSS1MCS7)?"VHTSS1MCS7":\
-(rate ==DESC_RATEVHTSS1MCS8)?"VHTSS1MCS8":\
-(rate ==DESC_RATEVHTSS1MCS9)?"VHTSS1MCS9":\
-(rate ==DESC_RATEVHTSS2MCS0)?"VHTSS2MCS0":\
-(rate ==DESC_RATEVHTSS2MCS1)?"VHTSS2MCS1":\
-(rate ==DESC_RATEVHTSS2MCS2)?"VHTSS2MCS2":\
-(rate ==DESC_RATEVHTSS2MCS3)?"VHTSS2MCS3":\
-(rate ==DESC_RATEVHTSS2MCS4)?"VHTSS2MCS4":\
-(rate ==DESC_RATEVHTSS2MCS5)?"VHTSS2MCS5":\
-(rate ==DESC_RATEVHTSS2MCS6)?"VHTSS2MCS6":\
-(rate ==DESC_RATEVHTSS2MCS7)?"VHTSS2MCS7":\
-(rate ==DESC_RATEVHTSS2MCS8)?"VHTSS2MCS8":\
-(rate ==DESC_RATEVHTSS2MCS9)?"VHTSS2MCS9":"UNKNOW"
+(rate == DESC_RATE1M) ? "CCK_1M" : \
+(rate == DESC_RATE2M) ? "CCK_2M" : \
+(rate == DESC_RATE5_5M) ? "CCK5_5M" : \
+(rate == DESC_RATE11M) ? "CCK_11M" : \
+(rate == DESC_RATE6M) ? "OFDM_6M" : \
+(rate == DESC_RATE9M) ? "OFDM_9M" : \
+(rate == DESC_RATE12M) ? "OFDM_12M" : \
+(rate == DESC_RATE18M) ? "OFDM_18M" : \
+(rate == DESC_RATE24M) ? "OFDM_24M" : \
+(rate == DESC_RATE36M) ? "OFDM_36M" : \
+(rate == DESC_RATE48M) ? "OFDM_48M" : \
+(rate == DESC_RATE54M) ? "OFDM_54M" : \
+(rate == DESC_RATEMCS0) ? "MCS0" : \
+(rate == DESC_RATEMCS1) ? "MCS1" : \
+(rate == DESC_RATEMCS2) ? "MCS2" : \
+(rate == DESC_RATEMCS3) ? "MCS3" : \
+(rate == DESC_RATEMCS4) ? "MCS4" : \
+(rate == DESC_RATEMCS5) ? "MCS5" : \
+(rate == DESC_RATEMCS6) ? "MCS6" : \
+(rate == DESC_RATEMCS7) ? "MCS7" : \
+(rate == DESC_RATEMCS8) ? "MCS8" : \
+(rate == DESC_RATEMCS9) ? "MCS9" : \
+(rate == DESC_RATEMCS10) ? "MCS10" : \
+(rate == DESC_RATEMCS11) ? "MCS11" : \
+(rate == DESC_RATEMCS12) ? "MCS12" : \
+(rate == DESC_RATEMCS13) ? "MCS13" : \
+(rate == DESC_RATEMCS14) ? "MCS14" : \
+(rate == DESC_RATEMCS15) ? "MCS15" : \
+(rate == DESC_RATEVHTSS1MCS0) ? "VHTSS1MCS0" : \
+(rate == DESC_RATEVHTSS1MCS1) ? "VHTSS1MCS1" : \
+(rate == DESC_RATEVHTSS1MCS2) ? "VHTSS1MCS2" : \
+(rate == DESC_RATEVHTSS1MCS3) ? "VHTSS1MCS3" : \
+(rate == DESC_RATEVHTSS1MCS4) ? "VHTSS1MCS4" : \
+(rate == DESC_RATEVHTSS1MCS5) ? "VHTSS1MCS5" : \
+(rate == DESC_RATEVHTSS1MCS6) ? "VHTSS1MCS6" : \
+(rate == DESC_RATEVHTSS1MCS7) ? "VHTSS1MCS7" : \
+(rate == DESC_RATEVHTSS1MCS8) ? "VHTSS1MCS8" : \
+(rate == DESC_RATEVHTSS1MCS9) ? "VHTSS1MCS9" : \
+(rate == DESC_RATEVHTSS2MCS0) ? "VHTSS2MCS0" : \
+(rate == DESC_RATEVHTSS2MCS1) ? "VHTSS2MCS1" : \
+(rate == DESC_RATEVHTSS2MCS2) ? "VHTSS2MCS2" : \
+(rate == DESC_RATEVHTSS2MCS3) ? "VHTSS2MCS3" : \
+(rate == DESC_RATEVHTSS2MCS4) ? "VHTSS2MCS4" : \
+(rate == DESC_RATEVHTSS2MCS5) ? "VHTSS2MCS5" : \
+(rate == DESC_RATEVHTSS2MCS6) ? "VHTSS2MCS6" : \
+(rate == DESC_RATEVHTSS2MCS7) ? "VHTSS2MCS7" : \
+(rate == DESC_RATEVHTSS2MCS8) ? "VHTSS2MCS8" : \
+(rate == DESC_RATEVHTSS2MCS9) ? "VHTSS2MCS9" : "UNKNOWN"
 
 
 enum{
 	UP_LINK,
 	DOWN_LINK,
 };
-typedef enum _RT_MEDIA_STATUS {
+enum rt_media_status {
 	RT_MEDIA_DISCONNECT = 0,
 	RT_MEDIA_CONNECT       = 1
-} RT_MEDIA_STATUS;
+};
 
 #define MAX_DLFW_PAGE_SIZE			4096	/*  @ page : 4k bytes */
-enum FIRMWARE_SOURCE {
-	FW_SOURCE_IMG_FILE = 0,
-	FW_SOURCE_HEADER_FILE = 1,		/* from header file */
-};
 
 /*  BK, BE, VI, VO, HCCA, MANAGEMENT, COMMAND, HIGH, BEACON. */
 /* define MAX_TX_QUEUE		9 */
@@ -184,16 +180,12 @@ enum FIRMWARE_SOURCE {
 #define TX_SELE_NQ			BIT(2)		/*  Normal Queue */
 #define TX_SELE_EQ			BIT(3)		/*  Extern Queue */
 
-#define PageNum_128(_Len)		(u32)(((_Len)>>7) + ((_Len)&0x7F ? 1:0))
-#define PageNum_256(_Len)		(u32)(((_Len)>>8) + ((_Len)&0xFF ? 1:0))
-#define PageNum_512(_Len)		(u32)(((_Len)>>9) + ((_Len)&0x1FF ? 1:0))
-#define PageNum(_Len, _Size)		(u32)(((_Len)/(_Size)) + ((_Len)&((_Size) - 1) ? 1:0))
-
+#define PageNum_128(_Len)		((u32)(((_Len) >> 7) + ((_Len) & 0x7F ? 1 : 0)))
 
 u8 rtw_hal_data_init(struct adapter *padapter);
 void rtw_hal_data_deinit(struct adapter *padapter);
 
-void dump_chip_info(HAL_VERSION	ChipVersion);
+void dump_chip_info(struct hal_version	ChipVersion);
 
 u8 /* return the final channel plan decision */
 hal_com_config_channel_plan(
@@ -215,9 +207,9 @@ u8 MRateToHwRate(u8 rate);
 u8 HwRateToMRate(u8 rate);
 
 void HalSetBrateCfg(
-	struct adapter *	Adapter,
-	u8 	*mBratesOS,
-	u16 		*pBrateCfg);
+	struct adapter *Adapter,
+	u8 *mBratesOS,
+	u16	*pBrateCfg);
 
 bool
 Hal_MappingOutPipe(
@@ -227,7 +219,7 @@ u8 NumOutPipe
 
 void hal_init_macaddr(struct adapter *adapter);
 
-void rtw_init_hal_com_default_value(struct adapter * Adapter);
+void rtw_init_hal_com_default_value(struct adapter *Adapter);
 
 void c2h_evt_clear(struct adapter *adapter);
 s32 c2h_evt_read_88xx(struct adapter *adapter, u8 *buf);
@@ -235,15 +227,15 @@ s32 c2h_evt_read_88xx(struct adapter *adapter, u8 *buf);
 u8 rtw_get_mgntframe_raid(struct adapter *adapter, unsigned char network_type);
 void rtw_hal_update_sta_rate_mask(struct adapter *padapter, struct sta_info *psta);
 
-void hw_var_port_switch (struct adapter *adapter);
+void hw_var_port_switch(struct adapter *adapter);
 
 void SetHwReg(struct adapter *padapter, u8 variable, u8 *val);
 void GetHwReg(struct adapter *padapter, u8 variable, u8 *val);
 void rtw_hal_check_rxfifo_full(struct adapter *adapter);
 
-u8 SetHalDefVar(struct adapter *adapter, enum HAL_DEF_VARIABLE variable,
+u8 SetHalDefVar(struct adapter *adapter, enum hal_def_variable variable,
 		void *value);
-u8 GetHalDefVar(struct adapter *adapter, enum HAL_DEF_VARIABLE variable,
+u8 GetHalDefVar(struct adapter *adapter, enum hal_def_variable variable,
 		void *value);
 
 bool eqNByte(u8 *str1, u8 *str2, u32 num);
@@ -278,23 +270,12 @@ void rtw_dump_raw_rssi_info(struct adapter *padapter);
 void rtw_bb_rf_gain_offset(struct adapter *padapter);
 
 void GetHalODMVar(struct adapter *Adapter,
-	enum HAL_ODM_VARIABLE		eVariable,
-	void *				pValue1,
-	void *				pValue2);
+	enum hal_odm_variable		eVariable,
+	void *pValue1,
+	void *pValue2);
 void SetHalODMVar(
-	struct adapter *			Adapter,
-	enum HAL_ODM_VARIABLE		eVariable,
-	void *				pValue1,
+	struct adapter *Adapter,
+	enum hal_odm_variable		eVariable,
+	void *pValue1,
 	bool					bSet);
-
-#ifdef CONFIG_BACKGROUND_NOISE_MONITOR
-struct noise_info
-{
-	u8 bPauseDIG;
-	u8 IGIValue;
-	u32 max_time;/* ms */
-	u8 chan;
-};
-#endif
-
 #endif /* __HAL_COMMON_H__ */

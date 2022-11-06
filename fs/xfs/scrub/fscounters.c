@@ -13,6 +13,7 @@
 #include "xfs_alloc.h"
 #include "xfs_ialloc.h"
 #include "xfs_health.h"
+#include "xfs_btree.h"
 #include "scrub/scrub.h"
 #include "scrub/common.h"
 #include "scrub/trace.h"
@@ -83,9 +84,6 @@ xchk_fscount_warmup(
 		error = xfs_alloc_read_agf(mp, sc->tp, agno, 0, &agf_bp);
 		if (error)
 			break;
-		error = -ENOMEM;
-		if (!agf_bp || !agi_bp)
-			break;
 
 		/*
 		 * These are supposed to be initialized by the header read
@@ -104,7 +102,7 @@ next_loop_perag:
 		pag = NULL;
 		error = 0;
 
-		if (fatal_signal_pending(current))
+		if (xchk_should_terminate(sc, &error))
 			break;
 	}
 
@@ -119,8 +117,7 @@ next_loop_perag:
 
 int
 xchk_setup_fscounters(
-	struct xfs_scrub	*sc,
-	struct xfs_inode	*ip)
+	struct xfs_scrub	*sc)
 {
 	struct xchk_fscounters	*fsc;
 	int			error;
@@ -147,6 +144,35 @@ xchk_setup_fscounters(
 	return xchk_trans_alloc(sc, 0);
 }
 
+/* Count free space btree blocks manually for pre-lazysbcount filesystems. */
+static int
+xchk_fscount_btreeblks(
+	struct xfs_scrub	*sc,
+	struct xchk_fscounters	*fsc,
+	xfs_agnumber_t		agno)
+{
+	xfs_extlen_t		blocks;
+	int			error;
+
+	error = xchk_ag_init(sc, agno, &sc->sa);
+	if (error)
+		return error;
+
+	error = xfs_btree_count_blocks(sc->sa.bno_cur, &blocks);
+	if (error)
+		goto out_free;
+	fsc->fdblocks += blocks - 1;
+
+	error = xfs_btree_count_blocks(sc->sa.cnt_cur, &blocks);
+	if (error)
+		goto out_free;
+	fsc->fdblocks += blocks - 1;
+
+out_free:
+	xchk_ag_free(sc, &sc->sa);
+	return error;
+}
+
 /*
  * Calculate what the global in-core counters ought to be from the incore
  * per-AG structure.  Callers can compare this to the actual in-core counters
@@ -163,6 +189,7 @@ xchk_fscount_aggregate_agcounts(
 	uint64_t		delayed;
 	xfs_agnumber_t		agno;
 	int			tries = 8;
+	int			error = 0;
 
 retry:
 	fsc->icount = 0;
@@ -185,7 +212,15 @@ retry:
 		/* Add up the free/freelist/bnobt/cntbt blocks */
 		fsc->fdblocks += pag->pagf_freeblks;
 		fsc->fdblocks += pag->pagf_flcount;
-		fsc->fdblocks += pag->pagf_btreeblks;
+		if (xfs_sb_version_haslazysbcount(&sc->mp->m_sb)) {
+			fsc->fdblocks += pag->pagf_btreeblks;
+		} else {
+			error = xchk_fscount_btreeblks(sc, fsc, agno);
+			if (error) {
+				xfs_perag_put(pag);
+				break;
+			}
+		}
 
 		/*
 		 * Per-AG reservations are taken out of the incore counters,
@@ -196,9 +231,12 @@ retry:
 
 		xfs_perag_put(pag);
 
-		if (fatal_signal_pending(current))
+		if (xchk_should_terminate(sc, &error))
 			break;
 	}
+
+	if (error)
+		return error;
 
 	/*
 	 * The global incore space reservation is taken from the incore

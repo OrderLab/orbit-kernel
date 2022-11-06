@@ -27,9 +27,12 @@
 #include <net/netfilter/nf_conntrack_ecache.h>
 #include <net/netfilter/nf_conntrack_extend.h>
 
+extern unsigned int nf_conntrack_net_id;
+
 static DEFINE_MUTEX(nf_ct_ecache_mutex);
 
 #define ECACHE_RETRY_WAIT (HZ/10)
+#define ECACHE_STACK_ALLOC (256 / sizeof(void *))
 
 enum retry_state {
 	STATE_CONGESTED,
@@ -39,11 +42,11 @@ enum retry_state {
 
 static enum retry_state ecache_work_evict_list(struct ct_pcpu *pcpu)
 {
-	struct nf_conn *refs[16];
+	struct nf_conn *refs[ECACHE_STACK_ALLOC];
+	enum retry_state ret = STATE_DONE;
 	struct nf_conntrack_tuple_hash *h;
 	struct hlist_nulls_node *n;
 	unsigned int evicted = 0;
-	enum retry_state ret = STATE_DONE;
 
 	spin_lock(&pcpu->lock);
 
@@ -54,10 +57,22 @@ static enum retry_state ecache_work_evict_list(struct ct_pcpu *pcpu)
 		if (!nf_ct_is_confirmed(ct))
 			continue;
 
+		/* This ecache access is safe because the ct is on the
+		 * pcpu dying list and we hold the spinlock -- the entry
+		 * cannot be free'd until after the lock is released.
+		 *
+		 * This is true even if ct has a refcount of 0: the
+		 * cpu that is about to free the entry must remove it
+		 * from the dying list and needs the lock to do so.
+		 */
 		e = nf_ct_ecache_find(ct);
 		if (!e || e->state != NFCT_ECACHE_DESTROY_FAIL)
 			continue;
 
+		/* ct is in NFCT_ECACHE_DESTROY_FAIL state, this means
+		 * the worker owns this entry: the ct will remain valid
+		 * until the worker puts its ct reference.
+		 */
 		if (nf_conntrack_event(IPCT_DESTROY, ct)) {
 			ret = STATE_CONGESTED;
 			break;
@@ -83,8 +98,8 @@ static enum retry_state ecache_work_evict_list(struct ct_pcpu *pcpu)
 
 static void ecache_work(struct work_struct *work)
 {
-	struct netns_ct *ctnet =
-		container_of(work, struct netns_ct, ecache_dwork.work);
+	struct nf_conntrack_net *cnet = container_of(work, struct nf_conntrack_net, ecache_dwork.work);
+	struct netns_ct *ctnet = cnet->ct_net;
 	int cpu, delay = -1;
 	struct ct_pcpu *pcpu;
 
@@ -114,7 +129,7 @@ static void ecache_work(struct work_struct *work)
 
 	ctnet->ecache_dwork_pending = delay > 0;
 	if (delay >= 0)
-		schedule_delayed_work(&ctnet->ecache_dwork, delay);
+		schedule_delayed_work(&cnet->ecache_dwork, delay);
 }
 
 int nf_conntrack_eventmask_report(unsigned int eventmask, struct nf_conn *ct,
@@ -189,14 +204,14 @@ void nf_ct_deliver_cached_events(struct nf_conn *ct)
 	if (notify == NULL)
 		goto out_unlock;
 
+	if (!nf_ct_is_confirmed(ct) || nf_ct_is_dying(ct))
+		goto out_unlock;
+
 	e = nf_ct_ecache_find(ct);
 	if (e == NULL)
 		goto out_unlock;
 
 	events = xchg(&e->cache, 0);
-
-	if (!nf_ct_is_confirmed(ct) || nf_ct_is_dying(ct))
-		goto out_unlock;
 
 	/* We make a copy of the missed event cache without taking
 	 * the lock, thus we may send missed events twice. However,
@@ -331,6 +346,20 @@ void nf_ct_expect_unregister_notifier(struct net *net,
 }
 EXPORT_SYMBOL_GPL(nf_ct_expect_unregister_notifier);
 
+void nf_conntrack_ecache_work(struct net *net, enum nf_ct_ecache_state state)
+{
+	struct nf_conntrack_net *cnet = net_generic(net, nf_conntrack_net_id);
+
+	if (state == NFCT_ECACHE_DESTROY_FAIL &&
+	    !delayed_work_pending(&cnet->ecache_dwork)) {
+		schedule_delayed_work(&cnet->ecache_dwork, HZ);
+		net->ct.ecache_dwork_pending = true;
+	} else if (state == NFCT_ECACHE_DESTROY_SENT) {
+		net->ct.ecache_dwork_pending = false;
+		mod_delayed_work(system_wq, &cnet->ecache_dwork, 0);
+	}
+}
+
 #define NF_CT_EVENTS_DEFAULT 1
 static int nf_ct_events __read_mostly = NF_CT_EVENTS_DEFAULT;
 
@@ -342,13 +371,18 @@ static const struct nf_ct_ext_type event_extend = {
 
 void nf_conntrack_ecache_pernet_init(struct net *net)
 {
+	struct nf_conntrack_net *cnet = net_generic(net, nf_conntrack_net_id);
+
 	net->ct.sysctl_events = nf_ct_events;
-	INIT_DELAYED_WORK(&net->ct.ecache_dwork, ecache_work);
+	cnet->ct_net = &net->ct;
+	INIT_DELAYED_WORK(&cnet->ecache_dwork, ecache_work);
 }
 
 void nf_conntrack_ecache_pernet_fini(struct net *net)
 {
-	cancel_delayed_work_sync(&net->ct.ecache_dwork);
+	struct nf_conntrack_net *cnet = net_generic(net, nf_conntrack_net_id);
+
+	cancel_delayed_work_sync(&cnet->ecache_dwork);
 }
 
 int nf_conntrack_ecache_init(void)

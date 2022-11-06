@@ -54,7 +54,6 @@ MODULE_PARM_DESC(sample_rate_min, "Minimal sample rate");
  */
 
 MODULE_LICENSE("GPL");
-MODULE_SUPPORTED_DEVICE("{{Digigram, Lola}}");
 MODULE_DESCRIPTION("Digigram Lola driver");
 MODULE_AUTHOR("Takashi Iwai <tiwai@suse.de>");
 
@@ -350,7 +349,7 @@ static int setup_corb_rirb(struct lola *chip)
 	unsigned long end_time;
 
 	err = snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV,
-				  snd_dma_pci_data(chip->pci),
+				  &chip->pci->dev,
 				  PAGE_SIZE, &chip->rb);
 	if (err < 0)
 		return err;
@@ -559,7 +558,7 @@ static int lola_create(struct snd_card *card, struct pci_dev *pci,
 	struct lola *chip;
 	int err;
 	unsigned int dever;
-	static struct snd_device_ops ops = {
+	static const struct snd_device_ops ops = {
 		.dev_free = lola_dev_free,
 	};
 
@@ -638,7 +637,7 @@ static int lola_create(struct snd_card *card, struct pci_dev *pci,
 		goto errout;
 	}
 	chip->irq = pci->irq;
-	synchronize_irq(chip->irq);
+	card->sync_irq = chip->irq;
 
 	dever = lola_readl(chip, BAR1, DEVER);
 	chip->pcm[CAPT].num_streams = (dever >> 0) & 0x3ff;
@@ -669,7 +668,7 @@ static int lola_create(struct snd_card *card, struct pci_dev *pci,
 	}
 
 	strcpy(card->driver, "Lola");
-	strlcpy(card->shortname, "Digigram Lola", sizeof(card->shortname));
+	strscpy(card->shortname, "Digigram Lola", sizeof(card->shortname));
 	snprintf(card->longname, sizeof(card->longname),
 		 "%s at 0x%lx irq %i",
 		 card->shortname, chip->bar[0].addr, chip->irq);

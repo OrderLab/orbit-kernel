@@ -35,7 +35,7 @@
 #define DRIVER_MINOR	0
 
 static bool is_support_iommu = true;
-static struct drm_driver rockchip_drm_driver;
+static const struct drm_driver rockchip_drm_driver;
 
 /*
  * Attach a (component) device to the shared drm dma mapping from master drm
@@ -135,14 +135,16 @@ static int rockchip_drm_bind(struct device *dev)
 	if (ret)
 		goto err_free;
 
-	drm_mode_config_init(drm_dev);
+	ret = drmm_mode_config_init(drm_dev);
+	if (ret)
+		goto err_iommu_cleanup;
 
 	rockchip_drm_mode_config_init(drm_dev);
 
 	/* Try to bind all sub drivers. */
 	ret = component_bind_all(dev, drm_dev);
 	if (ret)
-		goto err_mode_config_cleanup;
+		goto err_iommu_cleanup;
 
 	ret = drm_vblank_init(drm_dev, drm_dev->mode_config.num_crtc);
 	if (ret)
@@ -173,12 +175,9 @@ err_kms_helper_poll_fini:
 	rockchip_drm_fbdev_fini(drm_dev);
 err_unbind_all:
 	component_unbind_all(dev, drm_dev);
-err_mode_config_cleanup:
-	drm_mode_config_cleanup(drm_dev);
+err_iommu_cleanup:
 	rockchip_iommu_cleanup(drm_dev);
 err_free:
-	drm_dev->dev_private = NULL;
-	dev_set_drvdata(dev, NULL);
 	drm_dev_put(drm_dev);
 	return ret;
 }
@@ -194,11 +193,8 @@ static void rockchip_drm_unbind(struct device *dev)
 
 	drm_atomic_helper_shutdown(drm_dev);
 	component_unbind_all(dev, drm_dev);
-	drm_mode_config_cleanup(drm_dev);
 	rockchip_iommu_cleanup(drm_dev);
 
-	drm_dev->dev_private = NULL;
-	dev_set_drvdata(dev, NULL);
 	drm_dev_put(drm_dev);
 }
 
@@ -213,18 +209,13 @@ static const struct file_operations rockchip_drm_driver_fops = {
 	.release = drm_release,
 };
 
-static struct drm_driver rockchip_drm_driver = {
+static const struct drm_driver rockchip_drm_driver = {
 	.driver_features	= DRIVER_MODESET | DRIVER_GEM | DRIVER_ATOMIC,
 	.lastclose		= drm_fb_helper_lastclose,
-	.gem_vm_ops		= &drm_gem_cma_vm_ops,
-	.gem_free_object_unlocked = rockchip_gem_free_object,
 	.dumb_create		= rockchip_gem_dumb_create,
 	.prime_handle_to_fd	= drm_gem_prime_handle_to_fd,
 	.prime_fd_to_handle	= drm_gem_prime_fd_to_handle,
-	.gem_prime_get_sg_table	= rockchip_gem_prime_get_sg_table,
 	.gem_prime_import_sg_table	= rockchip_gem_prime_import_sg_table,
-	.gem_prime_vmap		= rockchip_gem_prime_vmap,
-	.gem_prime_vunmap	= rockchip_gem_prime_vunmap,
 	.gem_prime_mmap		= rockchip_gem_mmap_buf,
 	.fops			= &rockchip_drm_driver_fops,
 	.name	= DRIVER_NAME,

@@ -103,7 +103,7 @@
 #define MT9V111_MAX_CLKIN				27000000
 
 /* The default sensor configuration at startup time. */
-static struct v4l2_mbus_framefmt mt9v111_def_fmt = {
+static const struct v4l2_mbus_framefmt mt9v111_def_fmt = {
 	.width		= 640,
 	.height		= 480,
 	.code		= MEDIA_BUS_FMT_UYVY8_2X8,
@@ -1252,12 +1252,6 @@ static int mt9v111_remove(struct i2c_client *client)
 
 	mutex_destroy(&mt9v111->pwr_mutex);
 	mutex_destroy(&mt9v111->stream_mutex);
-
-	devm_gpiod_put(mt9v111->dev, mt9v111->oe);
-	devm_gpiod_put(mt9v111->dev, mt9v111->standby);
-	devm_gpiod_put(mt9v111->dev, mt9v111->reset);
-
-	devm_clk_put(mt9v111->dev, mt9v111->clk);
 
 	return 0;
 }

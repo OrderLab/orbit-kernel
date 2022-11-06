@@ -89,8 +89,7 @@ static inline void update_tty_status(struct ser_device *ser)
 	ser->tty_status =
 		ser->tty->stopped << 5 |
 		ser->tty->flow_stopped << 3 |
-		ser->tty->packet << 2 |
-		ser->tty->port->low_latency << 1;
+		ser->tty->packet << 2;
 }
 static inline void debugfs_init(struct ser_device *ser, struct tty_struct *tty)
 {
@@ -102,8 +101,8 @@ static inline void debugfs_init(struct ser_device *ser, struct tty_struct *tty)
 	debugfs_create_blob("last_rx_msg", 0400, ser->debugfs_tty_dir,
 			    &ser->rx_blob);
 
-	debugfs_create_x32("ser_state", 0400, ser->debugfs_tty_dir,
-			   (u32 *)&ser->state);
+	debugfs_create_xul("ser_state", 0400, ser->debugfs_tty_dir,
+			   &ser->state);
 
 	debugfs_create_x8("tty_status", 0400, ser->debugfs_tty_dir,
 			  &ser->tty_status);
@@ -266,11 +265,10 @@ error:
 	return tty_wr;
 }
 
-static int caif_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t caif_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct ser_device *ser;
 
-	BUG_ON(dev == NULL);
 	ser = netdev_priv(dev);
 
 	/* Send flow off once, on high water mark */
@@ -352,6 +350,7 @@ static int ldisc_open(struct tty_struct *tty)
 	rtnl_lock();
 	result = register_netdevice(dev);
 	if (result) {
+		tty_kref_put(tty);
 		rtnl_unlock();
 		free_netdev(dev);
 		return -ENODEV;
@@ -381,7 +380,6 @@ static void ldisc_close(struct tty_struct *tty)
 /* The line discipline structure. */
 static struct tty_ldisc_ops caif_ldisc = {
 	.owner =	THIS_MODULE,
-	.magic =	TTY_LDISC_MAGIC,
 	.name =		"n_caif",
 	.open =		ldisc_open,
 	.close =	ldisc_close,
@@ -389,18 +387,6 @@ static struct tty_ldisc_ops caif_ldisc = {
 	.write_wakeup =	ldisc_tx_wakeup
 };
 
-static int register_ldisc(void)
-{
-	int result;
-
-	result = tty_register_ldisc(N_CAIF, &caif_ldisc);
-	if (result < 0) {
-		pr_err("cannot register CAIF ldisc=%d err=%d\n", N_CAIF,
-			result);
-		return result;
-	}
-	return result;
-}
 static const struct net_device_ops netdev_ops = {
 	.ndo_open = caif_net_open,
 	.ndo_stop = caif_net_close,
@@ -443,7 +429,10 @@ static int __init caif_ser_init(void)
 {
 	int ret;
 
-	ret = register_ldisc();
+	ret = tty_register_ldisc(N_CAIF, &caif_ldisc);
+	if (ret < 0)
+		pr_err("cannot register CAIF ldisc=%d err=%d\n", N_CAIF, ret);
+
 	debugfsdir = debugfs_create_dir("caif_serial", NULL);
 	return ret;
 }

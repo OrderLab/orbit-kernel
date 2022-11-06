@@ -23,7 +23,7 @@
 	} while (0)
 
 
-void ConfigureTxpowerTrack(PDM_ODM_T pDM_Odm, PTXPWRTRACK_CFG pConfig)
+void ConfigureTxpowerTrack(struct dm_odm_t *pDM_Odm, struct txpwrtrack_cfg *pConfig)
 {
 	ConfigureTxpowerTrack_8723B(pConfig);
 }
@@ -36,7 +36,7 @@ void ConfigureTxpowerTrack(PDM_ODM_T pDM_Odm, PTXPWRTRACK_CFG pConfig)
 /*  NOTE: If Tx BB swing or Tx scaling is varified during run-time, still */
 /*        need to call this function. */
 /*  */
-void ODM_ClearTxPowerTrackingState(PDM_ODM_T pDM_Odm)
+void ODM_ClearTxPowerTrackingState(struct dm_odm_t *pDM_Odm)
 {
 	struct hal_com_data *pHalData = GET_HAL_DATA(pDM_Odm->Adapter);
 	u8 p = 0;
@@ -74,7 +74,7 @@ void ODM_TXPowerTrackingCallback_ThermalMeter(struct adapter *Adapter)
 {
 
 	struct hal_com_data *pHalData = GET_HAL_DATA(Adapter);
-	PDM_ODM_T pDM_Odm = &pHalData->odmpriv;
+	struct dm_odm_t *pDM_Odm = &pHalData->odmpriv;
 
 	u8 ThermalValue = 0, delta, delta_LCK, delta_IQK, p = 0, i = 0;
 	u8 ThermalValue_AVG_count = 0;
@@ -83,7 +83,7 @@ void ODM_TXPowerTrackingCallback_ThermalMeter(struct adapter *Adapter)
 	u8 OFDM_min_index = 0;  /*  OFDM BB Swing should be less than +3.0dB, which is required by Arthur */
 	u8 Indexforchannel = 0; /*  GetRightChnlPlaceforIQK(pHalData->CurrentChannel) */
 
-	TXPWRTRACK_CFG c;
+	struct txpwrtrack_cfg c;
 
 
 	/* 4 1. The following TWO tables decide the final index of OFDM/CCK swing table. */
@@ -92,7 +92,7 @@ void ODM_TXPowerTrackingCallback_ThermalMeter(struct adapter *Adapter)
 	u8 *deltaSwingTableIdx_TUP_B;
 	u8 *deltaSwingTableIdx_TDOWN_B;
 
-	/* 4 2. Initilization (7 steps in total) */
+	/* 4 2. Initialization (7 steps in total) */
 
 	ConfigureTxpowerTrack(pDM_Odm, &c);
 
@@ -213,7 +213,7 @@ void ODM_TXPowerTrackingCallback_ThermalMeter(struct adapter *Adapter)
 
 	/* 3 7. If necessary, move the index of swing table to adjust Tx power. */
 	if (delta > 0 && pDM_Odm->RFCalibrateInfo.TxPowerTrackControl) {
-		/* delta" here is used to record the absolute value of differrence. */
+		/* delta" here is used to record the absolute value of difference. */
 		delta =
 			ThermalValue > pHalData->EEPROMThermalMeter ?
 			(ThermalValue - pHalData->EEPROMThermalMeter) :
@@ -621,34 +621,4 @@ void ODM_TXPowerTrackingCallback_ThermalMeter(struct adapter *Adapter)
 	);
 
 	pDM_Odm->RFCalibrateInfo.TXPowercount = 0;
-}
-
-
-
-
-/* 3 ============================================================ */
-/* 3 IQ Calibration */
-/* 3 ============================================================ */
-
-u8 ODM_GetRightChnlPlaceforIQK(u8 chnl)
-{
-	u8 channel_all[ODM_TARGET_CHNL_NUM_2G_5G] = {
-		1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
-		36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58,
-		60, 62, 64, 100, 102, 104, 106, 108, 110, 112,
-		114, 116, 118, 120, 122, 124, 126, 128, 130, 132,
-		134, 136, 138, 140, 149, 151, 153, 155, 157, 159,
-		161, 163, 165
-	};
-	u8 place = chnl;
-
-
-	if (chnl > 14) {
-		for (place = 14; place < sizeof(channel_all); place++) {
-			if (channel_all[place] == chnl)
-				return place-13;
-		}
-	}
-	return 0;
-
 }

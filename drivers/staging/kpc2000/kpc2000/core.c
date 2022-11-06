@@ -124,6 +124,7 @@ static ssize_t cpld_reconfigure(struct device *dev,
 	writeq(wr_val, pcard->sysinfo_regs_base + REG_CPLD_CONFIG);
 	return count;
 }
+
 static DEVICE_ATTR(cpld_reconfigure, 0220, NULL, cpld_reconfigure);
 
 static ssize_t irq_mask_reg_show(struct device *dev,
@@ -337,7 +338,7 @@ static int kp2000_pcie_probe(struct pci_dev *pdev,
 	reg_bar_phys_addr = pci_resource_start(pcard->pdev, REG_BAR);
 	reg_bar_phys_len = pci_resource_len(pcard->pdev, REG_BAR);
 
-	pcard->regs_bar_base = ioremap_nocache(reg_bar_phys_addr, PAGE_SIZE);
+	pcard->regs_bar_base = ioremap(reg_bar_phys_addr, PAGE_SIZE);
 	if (!pcard->regs_bar_base) {
 		dev_err(&pcard->pdev->dev,
 			"probe: REG_BAR could not remap memory to virtual space\n");
@@ -366,8 +367,8 @@ static int kp2000_pcie_probe(struct pci_dev *pdev,
 	dma_bar_phys_addr = pci_resource_start(pcard->pdev, DMA_BAR);
 	dma_bar_phys_len = pci_resource_len(pcard->pdev, DMA_BAR);
 
-	pcard->dma_bar_base = ioremap_nocache(dma_bar_phys_addr,
-					      dma_bar_phys_len);
+	pcard->dma_bar_base = ioremap(dma_bar_phys_addr,
+				      dma_bar_phys_len);
 	if (!pcard->dma_bar_base) {
 		dev_err(&pcard->pdev->dev,
 			"probe: DMA_BAR could not remap memory to virtual space\n");

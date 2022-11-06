@@ -113,8 +113,6 @@ static void _sun4i_csi_try_fmt(struct sun4i_csi *csi,
 	pix->num_planes = _fmt->num_planes;
 	pix->pixelformat = _fmt->fourcc;
 
-	memset(pix->reserved, 0, sizeof(pix->reserved));
-
 	/* Align the width and height on the subsampling */
 	width = ALIGN(pix->width, _fmt->hsub);
 	height = ALIGN(pix->height, _fmt->vsub);
@@ -131,8 +129,6 @@ static void _sun4i_csi_try_fmt(struct sun4i_csi *csi,
 		bpl = pix->width / hsub * _fmt->bpp[i] / 8;
 		pix->plane_fmt[i].bytesperline = bpl;
 		pix->plane_fmt[i].sizeimage = bpl * pix->height / vsub;
-		memset(pix->plane_fmt[i].reserved, 0,
-		       sizeof(pix->plane_fmt[i].reserved));
 	}
 }
 
@@ -214,7 +210,7 @@ static int sun4i_csi_open(struct file *file)
 	if (ret < 0)
 		goto err_pm_put;
 
-	ret = v4l2_pipeline_pm_use(&csi->vdev.entity, 1);
+	ret = v4l2_pipeline_pm_get(&csi->vdev.entity);
 	if (ret)
 		goto err_pm_put;
 
@@ -227,7 +223,7 @@ static int sun4i_csi_open(struct file *file)
 	return 0;
 
 err_pipeline_pm_put:
-	v4l2_pipeline_pm_use(&csi->vdev.entity, 0);
+	v4l2_pipeline_pm_put(&csi->vdev.entity);
 
 err_pm_put:
 	pm_runtime_put(csi->dev);
@@ -242,8 +238,9 @@ static int sun4i_csi_release(struct file *file)
 
 	mutex_lock(&csi->lock);
 
-	v4l2_fh_release(file);
-	v4l2_pipeline_pm_use(&csi->vdev.entity, 0);
+	_vb2_fop_release(file, NULL);
+
+	v4l2_pipeline_pm_put(&csi->vdev.entity);
 	pm_runtime_put(csi->dev);
 
 	mutex_unlock(&csi->lock);
@@ -256,8 +253,6 @@ static const struct v4l2_file_operations sun4i_csi_fops = {
 	.open		= sun4i_csi_open,
 	.release	= sun4i_csi_release,
 	.unlocked_ioctl	= video_ioctl2,
-	.read		= vb2_fop_read,
-	.write		= vb2_fop_write,
 	.poll		= vb2_fop_poll,
 	.mmap		= vb2_fop_mmap,
 };
@@ -364,7 +359,7 @@ int sun4i_csi_v4l2_register(struct sun4i_csi *csi)
 	vdev->lock = &csi->lock;
 
 	/* Set a default format */
-	csi->fmt.pixelformat = sun4i_csi_formats[0].fourcc,
+	csi->fmt.pixelformat = sun4i_csi_formats[0].fourcc;
 	csi->fmt.width = CSI_DEFAULT_WIDTH;
 	csi->fmt.height = CSI_DEFAULT_HEIGHT;
 	_sun4i_csi_try_fmt(csi, &csi->fmt);
@@ -374,7 +369,7 @@ int sun4i_csi_v4l2_register(struct sun4i_csi *csi)
 	vdev->ioctl_ops = &sun4i_csi_ioctl_ops;
 	video_set_drvdata(vdev, csi);
 
-	ret = video_register_device(&csi->vdev, VFL_TYPE_GRABBER, -1);
+	ret = video_register_device(&csi->vdev, VFL_TYPE_VIDEO, -1);
 	if (ret)
 		return ret;
 

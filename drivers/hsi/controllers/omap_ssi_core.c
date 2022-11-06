@@ -296,7 +296,7 @@ static int ssi_clk_event(struct notifier_block *nb, unsigned long event,
 		break;
 	case ABORT_RATE_CHANGE:
 		dev_dbg(&ssi->device, "abort rate change\n");
-		/* Fall through */
+		fallthrough;
 	case POST_RATE_CHANGE:
 		dev_dbg(&ssi->device, "post rate change (%lu -> %lu)\n",
 			clk_data->old_rate, clk_data->new_rate);
@@ -424,7 +424,7 @@ static int ssi_hw_init(struct hsi_controller *ssi)
 	struct omap_ssi_controller *omap_ssi = hsi_controller_drvdata(ssi);
 	int err;
 
-	err = pm_runtime_get_sync(ssi->device.parent);
+	err = pm_runtime_resume_and_get(ssi->device.parent);
 	if (err < 0) {
 		dev_err(&ssi->device, "runtime PM failed %d\n", err);
 		return err;

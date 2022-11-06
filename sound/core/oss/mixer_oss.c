@@ -87,8 +87,8 @@ static int snd_mixer_oss_info(struct snd_mixer_oss_file *fmixer,
 	struct mixer_info info;
 	
 	memset(&info, 0, sizeof(info));
-	strlcpy(info.id, mixer && mixer->id[0] ? mixer->id : card->driver, sizeof(info.id));
-	strlcpy(info.name, mixer && mixer->name[0] ? mixer->name : card->mixername, sizeof(info.name));
+	strscpy(info.id, mixer && mixer->id[0] ? mixer->id : card->driver, sizeof(info.id));
+	strscpy(info.name, mixer && mixer->name[0] ? mixer->name : card->mixername, sizeof(info.name));
 	info.modify_counter = card->mixer_oss_change_count;
 	if (copy_to_user(_info, &info, sizeof(info)))
 		return -EFAULT;
@@ -103,8 +103,8 @@ static int snd_mixer_oss_info_obsolete(struct snd_mixer_oss_file *fmixer,
 	_old_mixer_info info;
 	
 	memset(&info, 0, sizeof(info));
-	strlcpy(info.id, mixer && mixer->id[0] ? mixer->id : card->driver, sizeof(info.id));
-	strlcpy(info.name, mixer && mixer->name[0] ? mixer->name : card->mixername, sizeof(info.name));
+	strscpy(info.id, mixer && mixer->id[0] ? mixer->id : card->driver, sizeof(info.id));
+	strscpy(info.name, mixer && mixer->name[0] ? mixer->name : card->mixername, sizeof(info.name));
 	if (copy_to_user(_info, &info, sizeof(info)))
 		return -EFAULT;
 	return 0;
@@ -418,7 +418,7 @@ static long snd_mixer_oss_conv(long val, long omin, long omax, long nmin, long n
 	
 	if (orange == 0)
 		return 0;
-	return ((nrange * (val - omin)) + (orange / 2)) / orange + nmin;
+	return DIV_ROUND_CLOSEST(nrange * (val - omin), orange) + nmin;
 }
 
 /* convert from alsa native to oss values (0-100) */
@@ -486,7 +486,7 @@ struct slot {
 	unsigned int channels;
 	unsigned int numid[SNDRV_MIXER_OSS_ITEM_COUNT];
 	unsigned int capture_item;
-	struct snd_mixer_oss_assign_table *assigned;
+	const struct snd_mixer_oss_assign_table *assigned;
 	unsigned int allocated: 1;
 };
 
@@ -499,7 +499,7 @@ static struct snd_kcontrol *snd_mixer_oss_test_id(struct snd_mixer_oss *mixer, c
 	
 	memset(&id, 0, sizeof(id));
 	id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
-	strlcpy(id.name, name, sizeof(id.name));
+	strscpy(id.name, name, sizeof(id.name));
 	id.index = index;
 	return snd_ctl_find_id(card, &id);
 }
@@ -934,8 +934,8 @@ static void snd_mixer_oss_slot_free(struct snd_mixer_oss_slot *chn)
 	struct slot *p = chn->private_data;
 	if (p) {
 		if (p->allocated && p->assigned) {
-			kfree(p->assigned->name);
-			kfree(p->assigned);
+			kfree_const(p->assigned->name);
+			kfree_const(p->assigned);
 		}
 		kfree(p);
 	}
@@ -953,7 +953,7 @@ static void mixer_slot_clear(struct snd_mixer_oss_slot *rslot)
 /* In a separate function to keep gcc 3.2 happy - do NOT merge this in
    snd_mixer_oss_build_input! */
 static int snd_mixer_oss_build_test_all(struct snd_mixer_oss *mixer,
-					struct snd_mixer_oss_assign_table *ptr,
+					const struct snd_mixer_oss_assign_table *ptr,
 					struct slot *slot)
 {
 	char str[64];
@@ -1017,7 +1017,9 @@ static int snd_mixer_oss_build_test_all(struct snd_mixer_oss *mixer,
  * ptr_allocated means the entry is dynamically allocated (change via proc file).
  * when replace_old = 1, the old entry is replaced with the new one.
  */
-static int snd_mixer_oss_build_input(struct snd_mixer_oss *mixer, struct snd_mixer_oss_assign_table *ptr, int ptr_allocated, int replace_old)
+static int snd_mixer_oss_build_input(struct snd_mixer_oss *mixer,
+				     const struct snd_mixer_oss_assign_table *ptr,
+				     int ptr_allocated, int replace_old)
 {
 	struct slot slot;
 	struct slot *pslot;
@@ -1107,7 +1109,7 @@ static int snd_mixer_oss_build_input(struct snd_mixer_oss *mixer, struct snd_mix
 /*
  */
 #define MIXER_VOL(name) [SOUND_MIXER_##name] = #name
-static char *oss_mixer_names[SNDRV_OSS_MAX_MIXERS] = {
+static const char * const oss_mixer_names[SNDRV_OSS_MAX_MIXERS] = {
 	MIXER_VOL(VOLUME),
 	MIXER_VOL(BASS),
 	MIXER_VOL(TREBLE),
@@ -1255,7 +1257,7 @@ static void snd_mixer_oss_proc_done(struct snd_mixer_oss *mixer)
 
 static void snd_mixer_oss_build(struct snd_mixer_oss *mixer)
 {
-	static struct snd_mixer_oss_assign_table table[] = {
+	static const struct snd_mixer_oss_assign_table table[] = {
 		{ SOUND_MIXER_VOLUME, 	"Master",		0 },
 		{ SOUND_MIXER_VOLUME, 	"Front",		0 }, /* fallback */
 		{ SOUND_MIXER_BASS,	"Tone Control - Bass",	0 },
@@ -1353,7 +1355,7 @@ static int snd_mixer_oss_notify_handler(struct snd_card *card, int cmd)
 		mixer->oss_dev_alloc = 1;
 		mixer->card = card;
 		if (*card->mixername)
-			strlcpy(mixer->name, card->mixername, sizeof(mixer->name));
+			strscpy(mixer->name, card->mixername, sizeof(mixer->name));
 		else
 			snprintf(mixer->name, sizeof(mixer->name),
 				 "mixer%i", card->number);

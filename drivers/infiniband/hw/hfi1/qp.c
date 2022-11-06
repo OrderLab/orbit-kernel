@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015 - 2019 Intel Corporation.
+ * Copyright(c) 2015 - 2020 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -186,31 +186,17 @@ static void flush_iowait(struct rvt_qp *qp)
 	write_sequnlock_irqrestore(lock, flags);
 }
 
-static inline int opa_mtu_enum_to_int(int mtu)
-{
-	switch (mtu) {
-	case OPA_MTU_8192:  return 8192;
-	case OPA_MTU_10240: return 10240;
-	default:            return -1;
-	}
-}
-
-/**
+/*
  * This function is what we would push to the core layer if we wanted to be a
  * "first class citizen".  Instead we hide this here and rely on Verbs ULPs
  * to blindly pass the MTU enum value from the PathRecord to us.
  */
 static inline int verbs_mtu_enum_to_int(struct ib_device *dev, enum ib_mtu mtu)
 {
-	int val;
-
 	/* Constraining 10KB packets to 8KB packets */
 	if (mtu == (enum ib_mtu)OPA_MTU_10240)
-		mtu = OPA_MTU_8192;
-	val = opa_mtu_enum_to_int((int)mtu);
-	if (val > 0)
-		return val;
-	return ib_mtu_enum_to_int(mtu);
+		mtu = (enum ib_mtu)OPA_MTU_8192;
+	return opa_mtu_enum_to_int((enum opa_mtu)mtu);
 }
 
 int hfi1_check_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
@@ -303,9 +289,9 @@ void hfi1_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
 
 /**
  * hfi1_setup_wqe - set up the wqe
- * @qp - The qp
- * @wqe - The built wqe
- * @call_send - Determine if the send should be posted or scheduled.
+ * @qp: The qp
+ * @wqe: The built wqe
+ * @call_send: Determine if the send should be posted or scheduled.
  *
  * Perform setup of the wqe.  This is called
  * prior to inserting the wqe into the ring but after
@@ -326,7 +312,7 @@ int hfi1_setup_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe, bool *call_send)
 	switch (qp->ibqp.qp_type) {
 	case IB_QPT_RC:
 		hfi1_setup_tid_rdma_wqe(qp, wqe);
-		/* fall through */
+		fallthrough;
 	case IB_QPT_UC:
 		if (wqe->length > 0x80000000U)
 			return -EINVAL;
@@ -353,6 +339,7 @@ int hfi1_setup_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe, bool *call_send)
 			return -EINVAL;
 		if (ibp->sl_to_sc[rdma_ah_get_sl(&ah->attr)] == 0xf)
 			return -EINVAL;
+		break;
 	default:
 		break;
 	}
@@ -608,7 +595,7 @@ struct sdma_engine *qp_to_sdma_engine(struct rvt_qp *qp, u8 sc5)
 	return sde;
 }
 
-/*
+/**
  * qp_to_send_context - map a qp to a send context
  * @qp: the QP
  * @sc5: the 5 bit sc
@@ -925,8 +912,8 @@ void notify_error_qp(struct rvt_qp *qp)
 
 /**
  * hfi1_qp_iter_cb - callback for iterator
- * @qp - the qp
- * @v - the sl in low bits of v
+ * @qp: the qp
+ * @v: the sl in low bits of v
  *
  * This is called from the iterator callback to work
  * on an individual qp.

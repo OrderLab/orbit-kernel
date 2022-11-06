@@ -19,10 +19,9 @@
  */
 int
 xchk_setup_ag_refcountbt(
-	struct xfs_scrub	*sc,
-	struct xfs_inode	*ip)
+	struct xfs_scrub	*sc)
 {
-	return xchk_setup_ag_btree(sc, ip, false);
+	return xchk_setup_ag_btree(sc, false);
 }
 
 /* Reference count btree scrubber. */
@@ -334,7 +333,7 @@ xchk_refcountbt_rec(
 {
 	struct xfs_mount	*mp = bs->cur->bc_mp;
 	xfs_agblock_t		*cow_blocks = bs->private;
-	xfs_agnumber_t		agno = bs->cur->bc_private.a.agno;
+	xfs_agnumber_t		agno = bs->cur->bc_ag.agno;
 	xfs_agblock_t		bno;
 	xfs_extlen_t		len;
 	xfs_nlink_t		refcount;

@@ -13,6 +13,8 @@
 #include <linux/hid-sensor-hub.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/trigger.h>
+#include <linux/iio/triggered_buffer.h>
+#include <linux/iio/trigger_consumer.h>
 #include <linux/iio/buffer.h>
 #include <linux/iio/sysfs.h>
 #include "hid-sensor-trigger.h"
@@ -81,15 +83,6 @@ static const struct attribute *hid_sensor_fifo_attributes[] = {
 	&iio_dev_attr_hwfifo_enabled.dev_attr.attr,
 	NULL,
 };
-
-static void hid_sensor_setup_batch_mode(struct iio_dev *indio_dev,
-					struct hid_sensor_common *st)
-{
-	if (!hid_sensor_batch_mode_supported(st))
-		return;
-
-	iio_buffer_set_attrs(indio_dev->buffer, hid_sensor_fifo_attributes);
-}
 
 static int _hid_sensor_power_state(struct hid_sensor_common *st, bool state)
 {
@@ -222,7 +215,8 @@ static int hid_sensor_data_rdy_trigger_set_state(struct iio_trigger *trig,
 	return hid_sensor_power_state(iio_trigger_get_drvdata(trig), state);
 }
 
-void hid_sensor_remove_trigger(struct hid_sensor_common *attrb)
+void hid_sensor_remove_trigger(struct iio_dev *indio_dev,
+			       struct hid_sensor_common *attrb)
 {
 	if (atomic_read(&attrb->runtime_pm_enable))
 		pm_runtime_disable(&attrb->pdev->dev);
@@ -233,6 +227,7 @@ void hid_sensor_remove_trigger(struct hid_sensor_common *attrb)
 	cancel_work_sync(&attrb->work);
 	iio_trigger_unregister(attrb->trigger);
 	iio_trigger_free(attrb->trigger);
+	iio_triggered_buffer_cleanup(indio_dev);
 }
 EXPORT_SYMBOL(hid_sensor_remove_trigger);
 
@@ -243,17 +238,31 @@ static const struct iio_trigger_ops hid_sensor_trigger_ops = {
 int hid_sensor_setup_trigger(struct iio_dev *indio_dev, const char *name,
 				struct hid_sensor_common *attrb)
 {
+	const struct attribute **fifo_attrs;
 	int ret;
 	struct iio_trigger *trig;
 
-	trig = iio_trigger_alloc("%s-dev%d", name, indio_dev->id);
+	if (hid_sensor_batch_mode_supported(attrb))
+		fifo_attrs = hid_sensor_fifo_attributes;
+	else
+		fifo_attrs = NULL;
+
+	ret = iio_triggered_buffer_setup_ext(indio_dev,
+					     &iio_pollfunc_store_time,
+					     NULL, NULL, fifo_attrs);
+	if (ret) {
+		dev_err(&indio_dev->dev, "Triggered Buffer Setup Failed\n");
+		return ret;
+	}
+
+	trig = iio_trigger_alloc(indio_dev->dev.parent,
+				 "%s-dev%d", name, indio_dev->id);
 	if (trig == NULL) {
 		dev_err(&indio_dev->dev, "Trigger Allocate Failed\n");
 		ret = -ENOMEM;
-		goto error_ret;
+		goto error_triggered_buffer_cleanup;
 	}
 
-	trig->dev.parent = indio_dev->dev.parent;
 	iio_trigger_set_drvdata(trig, attrb);
 	trig->ops = &hid_sensor_trigger_ops;
 	ret = iio_trigger_register(trig);
@@ -264,8 +273,6 @@ int hid_sensor_setup_trigger(struct iio_dev *indio_dev, const char *name,
 	}
 	attrb->trigger = trig;
 	indio_dev->trig = iio_trigger_get(trig);
-
-	hid_sensor_setup_batch_mode(indio_dev, attrb);
 
 	ret = pm_runtime_set_active(&indio_dev->dev);
 	if (ret)
@@ -284,7 +291,8 @@ error_unreg_trigger:
 	iio_trigger_unregister(trig);
 error_free_trig:
 	iio_trigger_free(trig);
-error_ret:
+error_triggered_buffer_cleanup:
+	iio_triggered_buffer_cleanup(indio_dev);
 	return ret;
 }
 EXPORT_SYMBOL(hid_sensor_setup_trigger);

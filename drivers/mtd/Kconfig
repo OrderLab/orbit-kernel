@@ -152,6 +152,7 @@ config SM_FTL
 	tristate "SmartMedia/xD new translation layer"
 	depends on BLOCK
 	select MTD_BLKDEVS
+	select MTD_NAND_CORE
 	select MTD_NAND_ECC_SW_HAMMING
 	help
 	  This enables EXPERIMENTAL R/W support for SmartMedia/xD
@@ -169,6 +170,16 @@ config MTD_OOPS
 	  This enables panic and oops messages to be logged to a circular
 	  buffer in a flash partition where it can be read back at some
 	  later point.
+
+config MTD_PSTORE
+	tristate "Log panic/oops to an MTD buffer based on pstore"
+	depends on PSTORE_BLK
+	help
+	  This enables panic and oops messages to be logged to a circular
+	  buffer in a flash partition where it can be read back as files after
+	  mounting pstore filesystem.
+
+	  If unsure, say N.
 
 config MTD_SWAP
 	tristate "Swap on MTD device support"

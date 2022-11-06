@@ -17,13 +17,9 @@
 #include <sound/initval.h>
 #include <sound/tlv.h>
 
-/*
- */
-
 MODULE_AUTHOR("Takashi Iwai <tiwai@suse.de>");
 MODULE_DESCRIPTION("Digigram VXPocket");
 MODULE_LICENSE("GPL");
-MODULE_SUPPORTED_DEVICE("{{Digigram,VXPocket},{Digigram,VXPocket440}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
@@ -82,7 +78,7 @@ static int snd_vxpocket_dev_free(struct snd_device *device)
 
 static const DECLARE_TLV_DB_SCALE(db_scale_old_vol, -11350, 50, 0);
 
-static struct snd_vx_hardware vxpocket_hw = {
+static const struct snd_vx_hardware vxpocket_hw = {
 	.name = "VXPocket",
 	.type = VX_TYPE_VXPOCKET,
 
@@ -104,7 +100,7 @@ static struct snd_vx_hardware vxpocket_hw = {
  * UER, but only for the first two inputs and outputs.
  */
 
-static struct snd_vx_hardware vxp440_hw = {
+static const struct snd_vx_hardware vxp440_hw = {
 	.name = "VXPocket440",
 	.type = VX_TYPE_VXP440,
 
@@ -126,7 +122,7 @@ static int snd_vxpocket_new(struct snd_card *card, int ibl,
 {
 	struct vx_core *chip;
 	struct snd_vxpocket *vxp;
-	static struct snd_device_ops ops = {
+	static const struct snd_device_ops ops = {
 		.dev_free =	snd_vxpocket_dev_free,
 	};
 	int err;
@@ -185,6 +181,7 @@ static int snd_vxpocket_assign_resources(struct vx_core *chip, int port, int irq
 		card->shortname, port, irq);
 
 	chip->irq = irq;
+	card->sync_irq = chip->irq;
 
 	if ((err = snd_vx_setup_firmware(chip)) < 0)
 		return err;

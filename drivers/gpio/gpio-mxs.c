@@ -60,11 +60,6 @@ static inline int is_imx23_gpio(struct mxs_gpio_port *port)
 	return port->devid == IMX23_GPIO;
 }
 
-static inline int is_imx28_gpio(struct mxs_gpio_port *port)
-{
-	return port->devid == IMX28_GPIO;
-}
-
 /* Note: This driver assumes 32 GPIOs are handled in one register */
 
 static int mxs_gpio_set_irq_type(struct irq_data *d, unsigned int type)
@@ -248,21 +243,11 @@ static int mxs_gpio_get_direction(struct gpio_chip *gc, unsigned offset)
 	u32 dir;
 
 	dir = readl(port->base + PINCTRL_DOE(port));
-	return !(dir & mask);
-}
+	if (dir & mask)
+		return GPIO_LINE_DIRECTION_OUT;
 
-static const struct platform_device_id mxs_gpio_ids[] = {
-	{
-		.name = "imx23-gpio",
-		.driver_data = IMX23_GPIO,
-	}, {
-		.name = "imx28-gpio",
-		.driver_data = IMX28_GPIO,
-	}, {
-		/* sentinel */
-	}
-};
-MODULE_DEVICE_TABLE(platform, mxs_gpio_ids);
+	return GPIO_LINE_DIRECTION_IN;
+}
 
 static const struct of_device_id mxs_gpio_dt_ids[] = {
 	{ .compatible = "fsl,imx23-gpio", .data = (void *) IMX23_GPIO, },
@@ -367,7 +352,6 @@ static struct platform_driver mxs_gpio_driver = {
 		.suppress_bind_attrs = true,
 	},
 	.probe		= mxs_gpio_probe,
-	.id_table	= mxs_gpio_ids,
 };
 
 static int __init mxs_gpio_init(void)

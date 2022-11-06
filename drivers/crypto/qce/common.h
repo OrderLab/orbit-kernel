@@ -10,6 +10,10 @@
 #include <linux/types.h>
 #include <crypto/aes.h>
 #include <crypto/hash.h>
+#include <crypto/internal/skcipher.h>
+
+/* xts du size */
+#define QCE_SECTOR_SIZE			512
 
 /* key size in bytes */
 #define QCE_SHA_HMAC_KEY_SIZE		64
@@ -79,16 +83,17 @@ struct qce_alg_template {
 	unsigned long alg_flags;
 	const u32 *std_iv;
 	union {
-		struct crypto_alg crypto;
+		struct skcipher_alg skcipher;
 		struct ahash_alg ahash;
 	} alg;
 	struct qce_device *qce;
+	const u8 *hash_zero;
+	const u32 digest_size;
 };
 
 void qce_cpu_to_be32p_array(__be32 *dst, const u8 *src, unsigned int len);
 int qce_check_status(struct qce_device *qce, u32 *status);
 void qce_get_version(struct qce_device *qce, u32 *major, u32 *minor, u32 *step);
-int qce_start(struct crypto_async_request *async_req, u32 type, u32 totallen,
-	      u32 offset);
+int qce_start(struct crypto_async_request *async_req, u32 type);
 
 #endif /* _COMMON_H_ */

@@ -86,7 +86,6 @@ enum {DEVICE_ALS300, DEVICE_ALS300_PLUS};
 MODULE_AUTHOR("Ash Willis <ashwillis@programmer.net>");
 MODULE_DESCRIPTION("Avance Logic ALS300");
 MODULE_LICENSE("GPL");
-MODULE_SUPPORTED_DEVICE("{{Avance Logic,ALS300},{Avance Logic,ALS300+}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
@@ -294,7 +293,7 @@ static int snd_als300_ac97(struct snd_als300 *chip)
 	struct snd_ac97_bus *bus;
 	struct snd_ac97_template ac97;
 	int err;
-	static struct snd_ac97_bus_ops ops = {
+	static const struct snd_ac97_bus_ops ops = {
 		.write = snd_als300_ac97_write,
 		.read = snd_als300_ac97_read,
 	};
@@ -378,7 +377,6 @@ static int snd_als300_playback_close(struct snd_pcm_substream *substream)
 	data = substream->runtime->private_data;
 	kfree(data);
 	chip->playback_substream = NULL;
-	snd_pcm_lib_free_pages(substream);
 	return 0;
 }
 
@@ -407,20 +405,7 @@ static int snd_als300_capture_close(struct snd_pcm_substream *substream)
 	data = substream->runtime->private_data;
 	kfree(data);
 	chip->capture_substream = NULL;
-	snd_pcm_lib_free_pages(substream);
 	return 0;
-}
-
-static int snd_als300_pcm_hw_params(struct snd_pcm_substream *substream,
-				    struct snd_pcm_hw_params *hw_params)
-{
-	return snd_pcm_lib_malloc_pages(substream,
-					params_buffer_bytes(hw_params));
-}
-
-static int snd_als300_pcm_hw_free(struct snd_pcm_substream *substream)
-{
-	return snd_pcm_lib_free_pages(substream);
 }
 
 static int snd_als300_playback_prepare(struct snd_pcm_substream *substream)
@@ -553,9 +538,6 @@ static snd_pcm_uframes_t snd_als300_pointer(struct snd_pcm_substream *substream)
 static const struct snd_pcm_ops snd_als300_playback_ops = {
 	.open =		snd_als300_playback_open,
 	.close =	snd_als300_playback_close,
-	.ioctl =	snd_pcm_lib_ioctl,
-	.hw_params =	snd_als300_pcm_hw_params,
-	.hw_free =	snd_als300_pcm_hw_free,
 	.prepare =	snd_als300_playback_prepare,
 	.trigger =	snd_als300_trigger,
 	.pointer =	snd_als300_pointer,
@@ -564,9 +546,6 @@ static const struct snd_pcm_ops snd_als300_playback_ops = {
 static const struct snd_pcm_ops snd_als300_capture_ops = {
 	.open =		snd_als300_capture_open,
 	.close =	snd_als300_capture_close,
-	.ioctl =	snd_pcm_lib_ioctl,
-	.hw_params =	snd_als300_pcm_hw_params,
-	.hw_free =	snd_als300_pcm_hw_free,
 	.prepare =	snd_als300_capture_prepare,
 	.trigger =	snd_als300_trigger,
 	.pointer =	snd_als300_pointer,
@@ -591,8 +570,8 @@ static int snd_als300_new_pcm(struct snd_als300 *chip)
 				&snd_als300_capture_ops);
 
 	/* pre-allocation of buffers */
-	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
-	snd_dma_pci_data(chip->pci), 64*1024, 64*1024);
+	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV, &chip->pci->dev,
+				       64*1024, 64*1024);
 	return 0;
 }
 
@@ -637,7 +616,7 @@ static int snd_als300_create(struct snd_card *card,
 	void *irq_handler;
 	int err;
 
-	static struct snd_device_ops ops = {
+	static const struct snd_device_ops ops = {
 		.dev_free = snd_als300_dev_free,
 	};
 	*rchip = NULL;
@@ -645,8 +624,7 @@ static int snd_als300_create(struct snd_card *card,
 	if ((err = pci_enable_device(pci)) < 0)
 		return err;
 
-	if (dma_set_mask(&pci->dev, DMA_BIT_MASK(28)) < 0 ||
-		dma_set_coherent_mask(&pci->dev, DMA_BIT_MASK(28)) < 0) {
+	if (dma_set_mask_and_coherent(&pci->dev, DMA_BIT_MASK(28))) {
 		dev_err(card->dev, "error setting 28bit DMA mask\n");
 		pci_disable_device(pci);
 		return -ENXIO;
@@ -684,7 +662,7 @@ static int snd_als300_create(struct snd_card *card,
 		return -EBUSY;
 	}
 	chip->irq = pci->irq;
-
+	card->sync_irq = chip->irq;
 
 	snd_als300_init(chip);
 

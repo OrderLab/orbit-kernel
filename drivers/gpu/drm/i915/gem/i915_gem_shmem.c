@@ -7,7 +7,9 @@
 #include <linux/pagevec.h>
 #include <linux/swap.h>
 
+#include "gem/i915_gem_region.h"
 #include "i915_drv.h"
+#include "i915_gemfs.h"
 #include "i915_gem_object.h"
 #include "i915_scatterlist.h"
 #include "i915_trace.h"
@@ -26,6 +28,7 @@ static void check_release_pagevec(struct pagevec *pvec)
 static int shmem_get_pages(struct drm_i915_gem_object *obj)
 {
 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
+	struct intel_memory_region *mem = obj->mm.region;
 	const unsigned long page_count = obj->base.size / PAGE_SIZE;
 	unsigned long i;
 	struct address_space *mapping;
@@ -51,7 +54,7 @@ static int shmem_get_pages(struct drm_i915_gem_object *obj)
 	 * If there's no chance of allocating enough pages for the whole
 	 * object, bail early.
 	 */
-	if (page_count > totalram_pages())
+	if (obj->base.size > resource_size(&mem->region))
 		return -ENOMEM;
 
 	st = kmalloc(sizeof(*st), GFP_KERNEL);
@@ -96,7 +99,7 @@ rebuild_st:
 				goto err_sg;
 			}
 
-			i915_gem_shrink(i915, 2 * page_count, NULL, *s++);
+			i915_gem_shrink(NULL, i915, 2 * page_count, NULL, *s++);
 
 			/*
 			 * We've tried hard to allocate the memory by reaping
@@ -144,7 +147,7 @@ rebuild_st:
 		last_pfn = page_to_pfn(page);
 
 		/* Check that the i965g/gm workaround works. */
-		WARN_ON((gfp & __GFP_DMA32) && (last_pfn >= 0x00100000UL));
+		GEM_BUG_ON(gfp & __GFP_DMA32 && last_pfn >= 0x00100000UL);
 	}
 	if (sg) { /* loop terminated early; short sg table */
 		sg_page_sizes |= sg->length;
@@ -169,7 +172,7 @@ rebuild_st:
 			max_segment = PAGE_SIZE;
 			goto rebuild_st;
 		} else {
-			dev_warn(&i915->drm.pdev->dev,
+			dev_warn(i915->drm.dev,
 				 "Failed to DMA remap %lu pages\n",
 				 page_count);
 			goto err_pages;
@@ -255,8 +258,8 @@ shmem_writeback(struct drm_i915_gem_object *obj)
 	for (i = 0; i < obj->base.size >> PAGE_SHIFT; i++) {
 		struct page *page;
 
-		page = find_lock_entry(mapping, i);
-		if (!page || xa_is_value(page))
+		page = find_lock_page(mapping, i);
+		if (!page)
 			continue;
 
 		if (!page_mapped(page) && clear_page_dirty_for_io(page)) {
@@ -293,8 +296,7 @@ __i915_gem_object_release_shmem(struct drm_i915_gem_object *obj,
 	__start_cpu_write(obj);
 }
 
-static void
-shmem_put_pages(struct drm_i915_gem_object *obj, struct sg_table *pages)
+void i915_gem_object_put_pages_shmem(struct drm_i915_gem_object *obj, struct sg_table *pages)
 {
 	struct sgt_iter sgt_iter;
 	struct pagevec pvec;
@@ -328,6 +330,15 @@ shmem_put_pages(struct drm_i915_gem_object *obj, struct sg_table *pages)
 	kfree(pages);
 }
 
+static void
+shmem_put_pages(struct drm_i915_gem_object *obj, struct sg_table *pages)
+{
+	if (likely(i915_gem_object_has_struct_page(obj)))
+		i915_gem_object_put_pages_shmem(obj, pages);
+	else
+		i915_gem_object_put_pages_phys(obj, pages);
+}
+
 static int
 shmem_pwrite(struct drm_i915_gem_object *obj,
 	     const struct drm_i915_gem_pwrite *arg)
@@ -339,6 +350,9 @@ shmem_pwrite(struct drm_i915_gem_object *obj,
 
 	/* Caller already validated user args */
 	GEM_BUG_ON(!access_ok(user_data, arg->size));
+
+	if (!i915_gem_object_has_struct_page(obj))
+		return i915_gem_object_pwrite_phys(obj, arg);
 
 	/*
 	 * Before we instantiate/pin the backing store for our use, we
@@ -418,14 +432,27 @@ shmem_pwrite(struct drm_i915_gem_object *obj,
 	return 0;
 }
 
+static int
+shmem_pread(struct drm_i915_gem_object *obj,
+	    const struct drm_i915_gem_pread *arg)
+{
+	if (!i915_gem_object_has_struct_page(obj))
+		return i915_gem_object_pread_phys(obj, arg);
+
+	return -ENODEV;
+}
+
 static void shmem_release(struct drm_i915_gem_object *obj)
 {
+	if (obj->flags & I915_BO_ALLOC_STRUCT_PAGE)
+		i915_gem_object_release_memory_region(obj);
+
 	fput(obj->base.filp);
 }
 
 const struct drm_i915_gem_object_ops i915_gem_shmem_ops = {
-	.flags = I915_GEM_OBJECT_HAS_STRUCT_PAGE |
-		 I915_GEM_OBJECT_IS_SHRINKABLE,
+	.name = "i915_gem_object_shmem",
+	.flags = I915_GEM_OBJECT_IS_SHRINKABLE,
 
 	.get_pages = shmem_get_pages,
 	.put_pages = shmem_put_pages,
@@ -433,13 +460,14 @@ const struct drm_i915_gem_object_ops i915_gem_shmem_ops = {
 	.writeback = shmem_writeback,
 
 	.pwrite = shmem_pwrite,
+	.pread = shmem_pread,
 
 	.release = shmem_release,
 };
 
-static int create_shmem(struct drm_i915_private *i915,
-			struct drm_gem_object *obj,
-			size_t size)
+static int __create_shmem(struct drm_i915_private *i915,
+			  struct drm_gem_object *obj,
+			  resource_size_t size)
 {
 	unsigned long flags = VM_NORESERVE;
 	struct file *filp;
@@ -458,33 +486,21 @@ static int create_shmem(struct drm_i915_private *i915,
 	return 0;
 }
 
-struct drm_i915_gem_object *
-i915_gem_object_create_shmem(struct drm_i915_private *i915, u64 size)
+static int shmem_object_init(struct intel_memory_region *mem,
+			     struct drm_i915_gem_object *obj,
+			     resource_size_t size,
+			     unsigned int flags)
 {
-	struct drm_i915_gem_object *obj;
+	static struct lock_class_key lock_class;
+	struct drm_i915_private *i915 = mem->i915;
 	struct address_space *mapping;
 	unsigned int cache_level;
 	gfp_t mask;
 	int ret;
 
-	/* There is a prevalence of the assumption that we fit the object's
-	 * page count inside a 32bit _signed_ variable. Let's document this and
-	 * catch if we ever need to fix it. In the meantime, if you do spot
-	 * such a local variable, please consider fixing!
-	 */
-	if (size >> PAGE_SHIFT > INT_MAX)
-		return ERR_PTR(-E2BIG);
-
-	if (overflows_type(size, obj->base.size))
-		return ERR_PTR(-E2BIG);
-
-	obj = i915_gem_object_alloc();
-	if (!obj)
-		return ERR_PTR(-ENOMEM);
-
-	ret = create_shmem(i915, &obj->base, size);
+	ret = __create_shmem(i915, &obj->base, size);
 	if (ret)
-		goto fail;
+		return ret;
 
 	mask = GFP_HIGHUSER | __GFP_RECLAIMABLE;
 	if (IS_I965GM(i915) || IS_I965G(i915)) {
@@ -497,7 +513,8 @@ i915_gem_object_create_shmem(struct drm_i915_private *i915, u64 size)
 	mapping_set_gfp_mask(mapping, mask);
 	GEM_BUG_ON(!(mapping_gfp_mask(mapping) & __GFP_RECLAIM));
 
-	i915_gem_object_init(obj, &i915_gem_shmem_ops);
+	i915_gem_object_init(obj, &i915_gem_shmem_ops, &lock_class,
+			     I915_BO_ALLOC_STRUCT_PAGE);
 
 	obj->write_domain = I915_GEM_DOMAIN_CPU;
 	obj->read_domains = I915_GEM_DOMAIN_CPU;
@@ -521,23 +538,27 @@ i915_gem_object_create_shmem(struct drm_i915_private *i915, u64 size)
 
 	i915_gem_object_set_cache_coherency(obj, cache_level);
 
-	trace_i915_gem_object_create(obj);
+	i915_gem_object_init_memory_region(obj, mem);
 
-	return obj;
+	return 0;
+}
 
-fail:
-	i915_gem_object_free(obj);
-	return ERR_PTR(ret);
+struct drm_i915_gem_object *
+i915_gem_object_create_shmem(struct drm_i915_private *i915,
+			     resource_size_t size)
+{
+	return i915_gem_object_create_region(i915->mm.regions[INTEL_REGION_SMEM],
+					     size, 0);
 }
 
 /* Allocate a new GEM object and fill it with the supplied data */
 struct drm_i915_gem_object *
 i915_gem_object_create_shmem_from_data(struct drm_i915_private *dev_priv,
-				       const void *data, size_t size)
+				       const void *data, resource_size_t size)
 {
 	struct drm_i915_gem_object *obj;
 	struct file *file;
-	size_t offset;
+	resource_size_t offset;
 	int err;
 
 	obj = i915_gem_object_create_shmem(dev_priv, round_up(size, PAGE_SIZE));
@@ -579,4 +600,43 @@ i915_gem_object_create_shmem_from_data(struct drm_i915_private *dev_priv,
 fail:
 	i915_gem_object_put(obj);
 	return ERR_PTR(err);
+}
+
+static int init_shmem(struct intel_memory_region *mem)
+{
+	int err;
+
+	err = i915_gemfs_init(mem->i915);
+	if (err) {
+		DRM_NOTE("Unable to create a private tmpfs mount, hugepage support will be disabled(%d).\n",
+			 err);
+	}
+
+	intel_memory_region_set_name(mem, "system");
+
+	return 0; /* Don't error, we can simply fallback to the kernel mnt */
+}
+
+static void release_shmem(struct intel_memory_region *mem)
+{
+	i915_gemfs_fini(mem->i915);
+}
+
+static const struct intel_memory_region_ops shmem_region_ops = {
+	.init = init_shmem,
+	.release = release_shmem,
+	.init_object = shmem_object_init,
+};
+
+struct intel_memory_region *i915_gem_shmem_setup(struct drm_i915_private *i915)
+{
+	return intel_memory_region_create(i915, 0,
+					  totalram_pages() << PAGE_SHIFT,
+					  PAGE_SIZE, 0,
+					  &shmem_region_ops);
+}
+
+bool i915_gem_object_is_shmem(const struct drm_i915_gem_object *obj)
+{
+	return obj->ops == &i915_gem_shmem_ops;
 }

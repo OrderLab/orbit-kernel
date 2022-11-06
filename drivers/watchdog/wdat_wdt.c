@@ -34,9 +34,9 @@ struct wdat_instruction {
  * @period: How long is one watchdog period in ms
  * @stopped_in_sleep: Is this watchdog stopped by the firmware in S1-S5
  * @stopped: Was the watchdog stopped by the driver in suspend
- * @actions: An array of instruction lists indexed by an action number from
- *           the WDAT table. There can be %NULL entries for not implemented
- *           actions.
+ * @instructions: An array of instruction lists indexed by an action number from
+ *                the WDAT table. There can be %NULL entries for not implemented
+ *                actions.
  */
 struct wdat_wdt {
 	struct platform_device *pdev;
@@ -209,7 +209,7 @@ static int wdat_wdt_enable_reboot(struct wdat_wdt *wdat)
 	 * WDAT specification says that the watchdog is required to reboot
 	 * the system when it fires. However, it also states that it is
 	 * recommeded to make it configurable through hardware register. We
-	 * enable reboot now if it is configrable, just in case.
+	 * enable reboot now if it is configurable, just in case.
 	 */
 	ret = wdat_wdt_run_action(wdat, ACPI_WDAT_SET_REBOOT, 0, NULL);
 	if (ret && ret != -EOPNOTSUPP) {

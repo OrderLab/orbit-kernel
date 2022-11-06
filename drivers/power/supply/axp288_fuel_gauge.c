@@ -718,12 +718,24 @@ static const struct dmi_system_id axp288_fuel_gauge_blacklist[] = {
 		},
 	},
 	{
+		/* Meegopad T02 */
+		.matches = {
+			DMI_MATCH(DMI_PRODUCT_NAME, "MEEGOPAD T02"),
+		},
+	},
+	{
 		/* Meegopad T08 */
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Default string"),
 			DMI_MATCH(DMI_BOARD_VENDOR, "To be filled by OEM."),
 			DMI_MATCH(DMI_BOARD_NAME, "T3 MRD"),
 			DMI_MATCH(DMI_BOARD_VERSION, "V1.1"),
+		},
+	},
+	{	/* Mele PCG03 Mini PC */
+		.matches = {
+			DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "Mini PC"),
+			DMI_EXACT_MATCH(DMI_BOARD_NAME, "Mini PC"),
 		},
 	},
 	{

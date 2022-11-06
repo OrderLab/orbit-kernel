@@ -24,7 +24,7 @@ static void update_recvframe_attrib(struct adapter *padapter,
 {
 	struct rx_pkt_attrib *pattrib;
 	struct recv_stat report;
-	PRXREPORT prxreport = (PRXREPORT)&report;
+	struct rxreport_8723b *prxreport = (struct rxreport_8723b *)&report;
 
 	report.rxdw0 = prxstat->rxdw0;
 	report.rxdw1 = prxstat->rxdw1;
@@ -38,7 +38,6 @@ static void update_recvframe_attrib(struct adapter *padapter,
 
 	/*  update rx report to recv_frame attribute */
 	pattrib->pkt_rpt_type = prxreport->c2h_ind ? C2H_PACKET : NORMAL_RX;
-/* 	DBG_871X("%s: pkt_rpt_type =%d\n", __func__, pattrib->pkt_rpt_type); */
 
 	if (pattrib->pkt_rpt_type == NORMAL_RX) {
 		/*  Normal rx packet */
@@ -98,7 +97,7 @@ static void update_recvframe_phyinfo(union recv_frame *precvframe,
 		.is_beacon   = false,
 	};
 
-	/* _irqL		irqL; */
+	/* unsigned long		irqL; */
 	struct sta_priv *pstapriv;
 	struct sta_info *psta;
 
@@ -124,11 +123,9 @@ static void update_recvframe_phyinfo(union recv_frame *precvframe,
 
 	pstapriv = &padapter->stapriv;
 	psta = rtw_get_stainfo(pstapriv, sa);
-	if (psta) {
+	if (psta)
 		pkt_info.station_id = psta->mac_id;
-		/* DBG_8192C("%s ==> StationID(%d)\n",
-		 * 	  __func__, pkt_info.station_id); */
-	}
+
 	pkt_info.data_rate = pattrib->data_rate;
 
 	/* rtl8723b_query_rx_phy_status(precvframe, pphy_status); */
@@ -165,8 +162,6 @@ static void rtl8723bs_c2h_packet_handler(struct adapter *padapter,
 	if (length == 0)
 		return;
 
-	/* DBG_871X("+%s() length =%d\n", __func__, length); */
-
 	tmp = rtw_zmalloc(length);
 	if (!tmp)
 		return;
@@ -177,10 +172,6 @@ static void rtl8723bs_c2h_packet_handler(struct adapter *padapter,
 
 	if (!res)
 		kfree(tmp);
-
-	/* DBG_871X("-%s res(%d)\n", __func__, res); */
-
-	return;
 }
 
 static inline union recv_frame *try_alloc_recvframe(struct recv_priv *precvpriv,
@@ -190,11 +181,10 @@ static inline union recv_frame *try_alloc_recvframe(struct recv_priv *precvpriv,
 
 	precvframe = rtw_alloc_recvframe(&precvpriv->free_recv_queue);
 	if (!precvframe) {
-		DBG_8192C("%s: no enough recv frame!\n", __func__);
 		rtw_enqueue_recvbuf_to_head(precvbuf,
 					    &precvpriv->recv_buf_pending_queue);
 
-		/*  The case of can't allocte recvframe should be temporary, */
+		/*  The case of can't allocate recvframe should be temporary, */
 		/*  schedule again and hope recvframe is available next time. */
 		tasklet_schedule(&precvpriv->recv_tasklet);
 	}
@@ -209,8 +199,6 @@ static inline bool rx_crc_err(struct recv_priv *precvpriv,
 {
 	/*  fix Hardware RX data error, drop whole recv_buffer */
 	if ((!(p_hal_data->ReceiveConfig & RCR_ACRC32)) && pattrib->crc_err) {
-		DBG_8192C("%s()-%d: RX Warning! rx CRC ERROR !!\n",
-			  __func__, __LINE__);
 		rtw_free_recvframe(precvframe, &precvpriv->free_recv_queue);
 		return true;
 	}
@@ -223,8 +211,6 @@ static inline bool pkt_exceeds_tail(struct recv_priv *precvpriv,
 				    union recv_frame *precvframe)
 {
 	if (end > tail) {
-		DBG_8192C("%s()-%d: : next pkt len(%p,%d) exceed ptail(%p)!\n",
-			  __func__, __LINE__, ptr, pkt_offset, precvbuf->ptail);
 		rtw_free_recvframe(precvframe, &precvpriv->free_recv_queue);
 		return true;
 	}
@@ -232,9 +218,10 @@ static inline bool pkt_exceeds_tail(struct recv_priv *precvpriv,
 	return false;
 }
 
-static void rtl8723bs_recv_tasklet(void *priv)
+static void rtl8723bs_recv_tasklet(struct tasklet_struct *t)
 {
-	struct adapter *padapter;
+	struct adapter *padapter = from_tasklet(padapter, t,
+						recvpriv.recv_tasklet);
 	struct hal_com_data *p_hal_data;
 	struct recv_priv *precvpriv;
 	struct recv_buf *precvbuf;
@@ -243,10 +230,9 @@ static void rtl8723bs_recv_tasklet(void *priv)
 	struct __queue *recv_buf_queue;
 	u8 *ptr;
 	u32 pkt_offset, skb_len, alloc_sz;
-	_pkt *pkt_copy = NULL;
+	struct sk_buff *pkt_copy = NULL;
 	u8 shift_sz = 0, rx_report_sz = 0;
 
-	padapter = priv;
 	p_hal_data = GET_HAL_DATA(padapter);
 	precvpriv = &padapter->recvpriv;
 	recv_buf_queue = &precvpriv->recv_buf_pending_queue;
@@ -283,9 +269,6 @@ static void rtl8723bs_recv_tasklet(void *priv)
 				break;
 
 			if ((pattrib->crc_err) || (pattrib->icv_err)) {
-				DBG_8192C("%s: crc_err =%d icv_err =%d, skip!\n",
-					  __func__, pattrib->crc_err,
-					  pattrib->icv_err);
 				rtw_free_recvframe(precvframe,
 						   &precvpriv->free_recv_queue);
 			} else {
@@ -313,38 +296,19 @@ static void rtl8723bs_recv_tasklet(void *priv)
 				}
 
 				pkt_copy = rtw_skb_alloc(alloc_sz);
-
-				if (pkt_copy) {
-					pkt_copy->dev = padapter->pnetdev;
-					precvframe->u.hdr.pkt = pkt_copy;
-					skb_reserve(pkt_copy, 8 - ((SIZE_PTR)(pkt_copy->data) & 7));/* force pkt_copy->data at 8-byte alignment address */
-					skb_reserve(pkt_copy, shift_sz);/* force ip_hdr at 8-byte alignment address according to shift_sz. */
-					memcpy(pkt_copy->data, (ptr + rx_report_sz + pattrib->shift_sz), skb_len);
-					precvframe->u.hdr.rx_head = pkt_copy->head;
-					precvframe->u.hdr.rx_data = precvframe->u.hdr.rx_tail = pkt_copy->data;
-					precvframe->u.hdr.rx_end = skb_end_pointer(pkt_copy);
-				} else {
-					if ((pattrib->mfrag == 1) && (pattrib->frag_num == 0)) {
-						DBG_8192C("%s: alloc_skb fail, drop frag frame\n", __func__);
-						rtw_free_recvframe(precvframe, &precvpriv->free_recv_queue);
-						break;
-					}
-
-					precvframe->u.hdr.pkt = rtw_skb_clone(precvbuf->pskb);
-					if (precvframe->u.hdr.pkt) {
-						_pkt *pkt_clone = precvframe->u.hdr.pkt;
-
-						pkt_clone->data = ptr + rx_report_sz + pattrib->shift_sz;
-						skb_reset_tail_pointer(pkt_clone);
-						precvframe->u.hdr.rx_head = precvframe->u.hdr.rx_data = precvframe->u.hdr.rx_tail
-							= pkt_clone->data;
-						precvframe->u.hdr.rx_end = pkt_clone->data + skb_len;
-					} else {
-						DBG_8192C("%s: rtw_skb_clone fail\n", __func__);
-						rtw_free_recvframe(precvframe, &precvpriv->free_recv_queue);
-						break;
-					}
+				if (!pkt_copy) {
+					rtw_free_recvframe(precvframe, &precvpriv->free_recv_queue);
+					break;
 				}
+
+				pkt_copy->dev = padapter->pnetdev;
+				precvframe->u.hdr.pkt = pkt_copy;
+				skb_reserve(pkt_copy, 8 - ((SIZE_PTR)(pkt_copy->data) & 7));/* force pkt_copy->data at 8-byte alignment address */
+				skb_reserve(pkt_copy, shift_sz);/* force ip_hdr at 8-byte alignment address according to shift_sz. */
+				memcpy(pkt_copy->data, (ptr + rx_report_sz + pattrib->shift_sz), skb_len);
+				precvframe->u.hdr.rx_head = pkt_copy->head;
+				precvframe->u.hdr.rx_data = precvframe->u.hdr.rx_tail = pkt_copy->data;
+				precvframe->u.hdr.rx_end = skb_end_pointer(pkt_copy);
 
 				recvframe_put(precvframe, skb_len);
 				/* recvframe_pull(precvframe, drvinfo_sz + RXDESC_SIZE); */
@@ -365,11 +329,9 @@ static void rtl8723bs_recv_tasklet(void *priv)
 					if (pattrib->physt)
 						update_recvframe_phyinfo(precvframe, (struct phy_stat *)ptr);
 
-					if (rtw_recv_entry(precvframe) != _SUCCESS) {
-						RT_TRACE(_module_rtl871x_recv_c_, _drv_dump_, ("%s: rtw_recv_entry(precvframe) != _SUCCESS\n", __func__));
-					}
+					rtw_recv_entry(precvframe);
 				} else if (pattrib->pkt_rpt_type == C2H_PACKET) {
-					C2H_EVT_HDR	C2hEvent;
+					struct c2h_evt_hdr_t	C2hEvent;
 
 					u16 len_c2h = pattrib->pkt_len;
 					u8 *pbuf_c2h = precvframe->u.hdr.rx_data;
@@ -389,7 +351,7 @@ static void rtl8723bs_recv_tasklet(void *priv)
 				}
 			}
 
-			pkt_offset = _RND8(pkt_offset);
+			pkt_offset = round_up(pkt_offset, 8);
 			precvbuf->pdata += pkt_offset;
 			ptr = precvbuf->pdata;
 			precvframe = NULL;
@@ -424,7 +386,6 @@ s32 rtl8723bs_init_recv_priv(struct adapter *padapter)
 	precvpriv->pallocated_recv_buf = rtw_zmalloc(n);
 	if (!precvpriv->pallocated_recv_buf) {
 		res = _FAIL;
-		RT_TRACE(_module_rtl871x_recv_c_, _drv_err_, ("alloc recv_buf fail!\n"));
 		goto exit;
 	}
 
@@ -448,10 +409,6 @@ s32 rtl8723bs_init_recv_priv(struct adapter *padapter)
 				alignment = tmpaddr & (RECVBUFF_ALIGN_SZ-1);
 				skb_reserve(precvbuf->pskb, (RECVBUFF_ALIGN_SZ - alignment));
 			}
-
-			if (!precvbuf->pskb) {
-				DBG_871X("%s: alloc_skb fail!\n", __func__);
-			}
 		}
 
 		list_add_tail(&precvbuf->list, &precvpriv->free_recv_buf_queue.queue);
@@ -464,11 +421,7 @@ s32 rtl8723bs_init_recv_priv(struct adapter *padapter)
 		goto initbuferror;
 
 	/* 3 2. init tasklet */
-	tasklet_init(
-		&precvpriv->recv_tasklet,
-		(void(*)(unsigned long))rtl8723bs_recv_tasklet,
-		(unsigned long)padapter
-	);
+	tasklet_setup(&precvpriv->recv_tasklet, rtl8723bs_recv_tasklet);
 
 	goto exit;
 
@@ -485,10 +438,8 @@ initbuferror:
 		precvpriv->precv_buf = NULL;
 	}
 
-	if (precvpriv->pallocated_recv_buf) {
-		kfree(precvpriv->pallocated_recv_buf);
-		precvpriv->pallocated_recv_buf = NULL;
-	}
+	kfree(precvpriv->pallocated_recv_buf);
+	precvpriv->pallocated_recv_buf = NULL;
 
 exit:
 	return res;
@@ -523,8 +474,6 @@ void rtl8723bs_free_recv_priv(struct adapter *padapter)
 		precvpriv->precv_buf = NULL;
 	}
 
-	if (precvpriv->pallocated_recv_buf) {
-		kfree(precvpriv->pallocated_recv_buf);
-		precvpriv->pallocated_recv_buf = NULL;
-	}
+	kfree(precvpriv->pallocated_recv_buf);
+	precvpriv->pallocated_recv_buf = NULL;
 }

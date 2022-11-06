@@ -31,16 +31,8 @@ MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_LICENSE("GPL");
 #ifndef SNDRV_SBAWE
 MODULE_DESCRIPTION("Sound Blaster 16");
-MODULE_SUPPORTED_DEVICE("{{Creative Labs,SB 16},"
-		"{Creative Labs,SB Vibra16S},"
-		"{Creative Labs,SB Vibra16C},"
-		"{Creative Labs,SB Vibra16CL},"
-		"{Creative Labs,SB Vibra16X}}");
 #else
 MODULE_DESCRIPTION("Sound Blaster AWE");
-MODULE_SUPPORTED_DEVICE("{{Creative Labs,SB AWE 32},"
-		"{Creative Labs,SB AWE 64},"
-		"{Creative Labs,SB AWE 64 Gold}}");
 #endif
 
 #if 0
@@ -509,9 +501,9 @@ static int snd_sb16_isa_match(struct device *pdev, unsigned int dev)
 static int snd_sb16_isa_probe(struct device *pdev, unsigned int dev)
 {
 	int err;
-	static int possible_irqs[] = {5, 9, 10, 7, -1};
-	static int possible_dmas8[] = {1, 3, 0, -1};
-	static int possible_dmas16[] = {5, 6, 7, -1};
+	static const int possible_irqs[] = {5, 9, 10, 7, -1};
+	static const int possible_dmas8[] = {1, 3, 0, -1};
+	static const int possible_dmas16[] = {5, 6, 7, -1};
 
 	if (irq[dev] == SNDRV_AUTO_IRQ) {
 		if ((irq[dev] = snd_legacy_find_free_irq(possible_irqs)) < 0) {
@@ -535,7 +527,7 @@ static int snd_sb16_isa_probe(struct device *pdev, unsigned int dev)
 	if (port[dev] != SNDRV_AUTO_PORT)
 		return snd_sb16_isa_probe1(dev, pdev);
 	else {
-		static int possible_ports[] = {0x220, 0x240, 0x260, 0x280};
+		static const int possible_ports[] = {0x220, 0x240, 0x260, 0x280};
 		int i;
 		for (i = 0; i < ARRAY_SIZE(possible_ports); i++) {
 			port[dev] = possible_ports[i];
@@ -547,10 +539,9 @@ static int snd_sb16_isa_probe(struct device *pdev, unsigned int dev)
 	}
 }
 
-static int snd_sb16_isa_remove(struct device *pdev, unsigned int dev)
+static void snd_sb16_isa_remove(struct device *pdev, unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(pdev));
-	return 0;
 }
 
 #ifdef CONFIG_PM

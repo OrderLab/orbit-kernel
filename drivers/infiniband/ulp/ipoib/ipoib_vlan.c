@@ -46,7 +46,7 @@ static ssize_t show_parent(struct device *d, struct device_attribute *attr,
 	struct net_device *dev = to_net_dev(d);
 	struct ipoib_dev_priv *priv = ipoib_priv(dev);
 
-	return sprintf(buf, "%s\n", priv->parent->name);
+	return sysfs_emit(buf, "%s\n", priv->parent->name);
 }
 static DEVICE_ATTR(parent, S_IRUGO, show_parent, NULL);
 
@@ -97,6 +97,7 @@ int __ipoib_vlan_add(struct ipoib_dev_priv *ppriv, struct ipoib_dev_priv *priv,
 {
 	struct net_device *ndev = priv->dev;
 	int result;
+	struct rdma_netdev *rn = netdev_priv(ndev);
 
 	ASSERT_RTNL();
 
@@ -116,6 +117,8 @@ int __ipoib_vlan_add(struct ipoib_dev_priv *ppriv, struct ipoib_dev_priv *priv,
 		result = -EINVAL;
 		goto out_early;
 	}
+
+	rn->mtu = priv->mcast_mtu;
 
 	priv->parent = ppriv->dev;
 	priv->pkey = pkey;

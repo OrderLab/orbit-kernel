@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /* Copyright (C) 2017 - 2018 Intel Corporation */
 
 #ifndef __IPU3_UAPI_H
@@ -120,13 +120,13 @@ struct ipu3_uapi_awb_config {
 #define IPU3_UAPI_AE_WEIGHTS				96
 
 /**
- + * struct ipu3_uapi_ae_raw_buffer - AE global weighted histogram
- + *
- + * @vals: Sum of IPU3_UAPI_AE_COLORS in cell
- + *
- + * Each histogram contains IPU3_UAPI_AE_BINS bins. Each bin has 24 bit unsigned
- + * for counting the number of the pixel.
- + */
+ * struct ipu3_uapi_ae_raw_buffer - AE global weighted histogram
+ *
+ * @vals: Sum of IPU3_UAPI_AE_COLORS in cell
+ *
+ * Each histogram contains IPU3_UAPI_AE_BINS bins. Each bin has 24 bit unsigned
+ * for counting the number of the pixel.
+ */
 struct ipu3_uapi_ae_raw_buffer {
 	__u32 vals[IPU3_UAPI_AE_BINS * IPU3_UAPI_AE_COLORS];
 } __packed;
@@ -418,7 +418,7 @@ struct ipu3_uapi_af_config_s {
 	 IPU3_UAPI_AWB_FR_SPARE_FOR_BUBBLES) * IPU3_UAPI_MAX_STRIPES)
 
 /**
- * struct ipu3_uapi_awb_fr_meta_data - AWB filter response meta data
+ * struct ipu3_uapi_awb_fr_raw_buffer - AWB filter response meta data
  *
  * @meta_data: Statistics output on the grid after convolving with 1D filter.
  */
@@ -1218,6 +1218,11 @@ struct ipu3_uapi_shd_config {
  *
  * All CU inputs are unsigned, they will be converted to signed when written
  * to register, i.e. a01 will be written to 9 bit register in s4.4 format.
+ * The data precision s4.4 means 4 bits for integer parts and 4 bits for the
+ * fractional part, the first bit indicates positive or negative value.
+ * For userspace software (commonly the imaging library), the computation for
+ * the CU slope values should be based on the slope resolution 1/16 (binary
+ * 0.0001 - the minimal interval value), the slope value range is [-256, +255].
  * This applies to &ipu3_uapi_iefd_cux6_ed, &ipu3_uapi_iefd_cux2_1,
  * &ipu3_uapi_iefd_cux2_1, &ipu3_uapi_iefd_cux4 and &ipu3_uapi_iefd_cux6_rad.
  */
@@ -1501,7 +1506,7 @@ struct ipu3_uapi_sharp_cfg {
 } __packed;
 
 /**
- * struct struct ipu3_uapi_far_w - Sharpening config for far sub-group
+ * struct ipu3_uapi_far_w - Sharpening config for far sub-group
  *
  * @dir_shrp:	Weight of wide direct sharpening, u1.6, range [0, 64], default 64.
  * @reserved0:	reserved
@@ -1521,7 +1526,7 @@ struct ipu3_uapi_far_w {
 } __packed;
 
 /**
- * struct struct ipu3_uapi_unsharp_cfg - Unsharp config
+ * struct ipu3_uapi_unsharp_cfg - Unsharp config
  *
  * @unsharp_weight: Unsharp mask blending weight.
  *		    u1.6, range [0, 64], default 16.
@@ -1767,7 +1772,7 @@ struct ipu3_uapi_vss_lut_y {
 } __packed;
 
 /**
- * struct ipu3_uapi_yuvp1_iefd_vssnlm_cf - IEFd Vssnlm Lookup table
+ * struct ipu3_uapi_yuvp1_iefd_vssnlm_cfg - IEFd Vssnlm Lookup table
  *
  * @vss_lut_x: vss lookup table. See &ipu3_uapi_vss_lut_x description
  * @vss_lut_y: vss lookup table. See &ipu3_uapi_vss_lut_y description
